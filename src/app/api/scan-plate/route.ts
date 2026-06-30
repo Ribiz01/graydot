@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { scanPlate } from '@/ai/flows/scan-plate-flow';
+
+export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
   try {
@@ -7,6 +8,8 @@ export async function POST(req: NextRequest) {
     if (!body?.photoDataUri) {
       return NextResponse.json({ error: 'photoDataUri is required' }, { status: 400 });
     }
+    // Dynamic import prevents genkit from being evaluated at build time
+    const { scanPlate } = await import('@/ai/flows/scan-plate-flow');
     const result = await scanPlate({ photoDataUri: body.photoDataUri });
     return NextResponse.json(result);
   } catch (error: any) {

@@ -15,6 +15,8 @@ const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: false,
   },
+  // Genkit and Google AI packages use Node.js APIs that can't be bundled by webpack
+  serverExternalPackages: ['genkit', '@genkit-ai/google-genai', '@genkit-ai/next'],
   images: {
     remotePatterns: [
       {

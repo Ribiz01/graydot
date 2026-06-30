@@ -32,6 +32,7 @@ import type { Service, Vehicle, Transaction, UserProfile, Washer, Customer, Cust
 import { calcPointsEarned, calcTier } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Check, ChevronLeft, ChevronRight, Loader2, Sparkles, Wind, Droplets, Car, Camera, Image as ImageIcon, Disc, Star, Share2, Ban, Trophy } from "lucide-react";
 import { Checkbox } from "../ui/checkbox";
 import { VehicleCamera } from "./vehicle-camera";
