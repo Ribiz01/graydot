@@ -1,0 +1,842 @@
+
+"use client";
+
+import { useState } from "react";
+import { z } from "zod";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { AnimatePresence, motion } from "framer-motion";
+import { collection, addDoc, doc, setDoc, updateDoc, query, where, getDocs, serverTimestamp, increment } from 'firebase/firestore';
+import { useFirestore, useMemoFirebase, FirestorePermissionError, errorEmitter } from '@/firebase';
+import { useUser } from "@/firebase/auth/use-user";
+import { useCollection } from "@/firebase/firestore/use-collection";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { useToast } from "@/hooks/use-toast";
+import type { Service, Vehicle, Transaction, UserProfile, Washer, Customer, CustomerTier } from "@/lib/types";
+import { calcPointsEarned, calcTier } from "@/lib/types";
+import { formatCurrency } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { Check, ChevronLeft, ChevronRight, Loader2, Sparkles, Wind, Droplets, Car, Camera, Image as ImageIcon, Disc, Star, Share2, Ban, Trophy } from "lucide-react";
+import { Checkbox } from "../ui/checkbox";
+import { VehicleCamera } from "./vehicle-camera";
+
+const vehicleSchema = z.object({
+  licensePlate: z.string().min(3, "License plate is required").toUpperCase(),
+});
+
+const newVehicleSchema = z.object({
+  licensePlate: z.string().min(3).toUpperCase(),
+  type: z.enum(["Sedan", "SUV", "Truck", "Minibus"]),
+  ownerName: z.string().optional(),
+  phoneNumber: z.string().optional(),
+});
+
+const servicesSchema = z.object({
+  selectedServices: z.array(z.string()).min(1, "Please select at least one service."),
+  assignedWashers: z.array(z.string()).min(1, "Please select at least one washer."),
+});
+
+const paymentSchema = z.object({
+    paymentMethod: z.enum(["Cash", "Mobile Money", "Corporate Account"]),
+    reference: z.string().optional(),
+}).refine((data) => {
+    if (data.paymentMethod === 'Mobile Money' || data.paymentMethod === 'Corporate Account') {
+        return (data.reference ?? '').trim().length > 0;
+    }
+    return true;
+}, {
+    message: "A reference number is required",
+    path: ["reference"],
+});
+
+
+type Step = "vehicle" | "new-vehicle" | "services" | "payment" | "receipt";
+
+const serviceIcons: { [key: string]: React.ReactNode } = {
+    'Exterior Wash': <Droplets className="h-6 w-6 text-primary" />,
+    'Interior Vacuum': <Wind className="h-6 w-6 text-primary" />,
+    'Wax & Polish': <Sparkles className="h-6 w-6 text-primary" />,
+    'Engine Wash': <Car className="h-6 w-6 text-primary" />,
+    'Tire Shine': <Disc className="h-6 w-6 text-primary" />,
+    'Full Detail': <Star className="h-6 w-6 text-primary" />,
+};
+
+export function Workflow() {
+  const [step, setStep] = useState<Step>("vehicle");
+  const [currentVehicle, setCurrentVehicle] = useState<Vehicle | null>(null);
+  const [transaction, setTransaction] = useState<Transaction | null>(null);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [cameraMode, setCameraMode] = useState<'scan' | 'capture'>('capture');
+  const [vehiclePhotoUri, setVehiclePhotoUri] = useState<string | null>(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [isFindingVehicle, setIsFindingVehicle] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isNewVehicleSaved, setIsNewVehicleSaved] = useState(false);
+  const [isVoidDialogOpen, setIsVoidDialogOpen] = useState(false);
+  const [isVoiding, setIsVoiding] = useState(false);
+  const [customerInfo, setCustomerInfo] = useState<Customer | null>(null);
+
+  const { user } = useUser();
+  const firestore = useFirestore();
+  const { toast } = useToast();
+
+  const servicesQuery = useMemoFirebase(() => firestore ? collection(firestore, 'services') : null, [firestore]);
+  const { data: allServices, isLoading: isLoadingServices } = useCollection<Service>(servicesQuery);
+
+  const washersQuery = useMemoFirebase(() => firestore ? collection(firestore, 'washers') : null, [firestore]);
+  const { data: allWashers, isLoading: isLoadingWashers } = useCollection<Washer>(washersQuery);
+
+  const vehicleForm = useForm<z.infer<typeof vehicleSchema>>({
+    resolver: zodResolver(vehicleSchema),
+    defaultValues: { licensePlate: "" },
+  });
+
+  const newVehicleForm = useForm<z.infer<typeof newVehicleSchema>>({
+    resolver: zodResolver(newVehicleSchema),
+    defaultValues: {
+      licensePlate: "",
+      type: "Sedan",
+      ownerName: "",
+      phoneNumber: "",
+    },
+  });
+
+  const servicesForm = useForm<z.infer<typeof servicesSchema>>({
+    resolver: zodResolver(servicesSchema),
+    defaultValues: { selectedServices: [], assignedWashers: [] },
+  });
+
+  const paymentForm = useForm<z.infer<typeof paymentSchema>>({
+    resolver: zodResolver(paymentSchema),
+    defaultValues: { paymentMethod: "Cash", reference: "" },
+  });
+
+
+  const handleVehicleSubmit = async (data: z.infer<typeof vehicleSchema>) => {
+    if (!firestore) return;
+    setIsFindingVehicle(true);
+    try {
+      const vehiclesRef = collection(firestore, 'vehicles');
+      const q = query(vehiclesRef, where("licensePlate", "==", data.licensePlate));
+      const querySnapshot = await getDocs(q);
+
+      if (!querySnapshot.empty) {
+        const found = { id: querySnapshot.docs[0].id, ...querySnapshot.docs[0].data() } as Vehicle;
+        setCurrentVehicle(found);
+        // Look up loyalty profile by phone number
+        if (found.phoneNumber) {
+          const custQ = query(collection(firestore, 'customers'), where('phoneNumber', '==', found.phoneNumber));
+          const custSnap = await getDocs(custQ);
+          if (!custSnap.empty) {
+            setCustomerInfo({ id: custSnap.docs[0].id, ...custSnap.docs[0].data() } as Customer);
+          } else {
+            setCustomerInfo(null);
+          }
+        } else {
+          setCustomerInfo(null);
+        }
+        setStep("services");
+      } else {
+        newVehicleForm.setValue("licensePlate", data.licensePlate);
+        setIsNewVehicleSaved(false);
+        setStep("new-vehicle");
+      }
+    } catch (error) {
+        toast({ title: "Error", description: "Could not find vehicle.", variant: "destructive" });
+    } finally {
+        setIsFindingVehicle(false);
+    }
+  };
+
+  const handleNewVehicleSubmit = async (data: z.infer<typeof newVehicleSchema>) => {
+    if (!firestore) return;
+    setIsSubmitting(true);
+    const newVehicle: Omit<Vehicle, 'id'> = { ...data, photoDataUri: vehiclePhotoUri || undefined };
+    try {
+        const vehicleRef = doc(firestore, 'vehicles', data.licensePlate);
+        await setDoc(vehicleRef, newVehicle);
+        const savedVehicle = { id: data.licensePlate, ...newVehicle };
+        setCurrentVehicle(savedVehicle);
+        toast({ title: "Vehicle Registered", description: `${data.licensePlate} has been saved.` });
+        setIsNewVehicleSaved(true);
+    } catch (error: any) {
+        toast({ title: "Error", description: error.message || "Could not add vehicle.", variant: "destructive" });
+    } finally {
+        setIsSubmitting(false);
+    }
+  };
+
+  const handleServicesSubmit = () => setStep("payment");
+
+  const handlePaymentSubmit = async (data: z.infer<typeof paymentSchema>) => {
+    if (!currentVehicle || !user || !firestore || !allServices) return;
+    setIsSubmitting(true);
+
+    const selectedIds = servicesForm.getValues("selectedServices");
+    const assignedWasherIds = servicesForm.getValues("assignedWashers");
+    const assignedWashers = allWashers
+      ?.filter(w => assignedWasherIds.includes(w.id))
+      .map(w => ({ id: w.id, name: w.name })) || [];
+
+    const selectedServices = allServices.filter(s => selectedIds.includes(s.id));
+    const totalAmount = selectedServices.reduce((acc, s) => acc + s.price, 0);
+
+
+    const newTransactionData: Omit<Transaction, 'id'> = {
+      timestamp: new Date().toISOString(),
+      createdAt: serverTimestamp(),
+      licensePlate: currentVehicle.licensePlate,
+      services: selectedServices.map(s => ({ id: s.id, name: s.name, price: s.price })),
+      totalAmount: totalAmount,
+      payment: {
+        method: data.paymentMethod,
+        reference: data.reference,
+        amount: totalAmount,
+      },
+      userId: user.uid,
+      ...(user.profile?.locationId && {
+        locationId: user.profile.locationId,
+        locationName: user.profile.locationName ?? "",
+      }),
+      assignedWashers,
+      // Cash + Mobile Money = Completed immediately; Corporate = bill later
+      status: data.paymentMethod === 'Corporate Account' ? 'Pending Payment' : 'Completed',
+      // Denormalised so corporate page can show who hasn't paid without a vehicle join
+      ...(currentVehicle.ownerName && { customerName: currentVehicle.ownerName }),
+      ...(currentVehicle.phoneNumber && { customerPhone: currentVehicle.phoneNumber }),
+    };
+    
+    try {
+        const docRef = await addDoc(collection(firestore, 'transactions'), newTransactionData);
+        const finalTransaction: Transaction = { id: docRef.id, ...newTransactionData };
+
+        // Write a durable receipt record (B7)
+        await setDoc(doc(firestore, 'receipts', docRef.id), {
+          transactionId: docRef.id,
+          licensePlate: currentVehicle.licensePlate,
+          services: newTransactionData.services,
+          totalAmount: newTransactionData.totalAmount,
+          paymentMethod: data.paymentMethod,
+          status: newTransactionData.status,
+          userId: user.uid,
+          createdAt: serverTimestamp(),
+        });
+
+        // Update customer loyalty points (only for Completed, cash or MoMo)
+        if (newTransactionData.status === 'Completed' && currentVehicle.phoneNumber && currentVehicle.ownerName) {
+          const pointsEarned = calcPointsEarned(totalAmount);
+          const custQ = query(collection(firestore, 'customers'), where('phoneNumber', '==', currentVehicle.phoneNumber));
+          const custSnap = await getDocs(custQ);
+          if (custSnap.empty) {
+            // Create new customer record
+            const newPoints = pointsEarned;
+            await addDoc(collection(firestore, 'customers'), {
+              name: currentVehicle.ownerName,
+              phoneNumber: currentVehicle.phoneNumber,
+              totalPoints: newPoints,
+              totalVisits: 1,
+              totalSpendNgwe: totalAmount,
+              tier: calcTier(newPoints),
+              createdAt: serverTimestamp(),
+              lastVisitAt: serverTimestamp(),
+            });
+          } else {
+            // Increment existing customer
+            const custRef = doc(firestore, 'customers', custSnap.docs[0].id);
+            const prevPoints = (custSnap.docs[0].data().totalPoints ?? 0) + pointsEarned;
+            await updateDoc(custRef, {
+              totalPoints: increment(pointsEarned),
+              totalVisits: increment(1),
+              totalSpendNgwe: increment(totalAmount),
+              tier: calcTier(prevPoints),
+              lastVisitAt: serverTimestamp(),
+            });
+          }
+        }
+
+        setTransaction(finalTransaction);
+        setStep("receipt");
+
+        toast({
+            title: "Transaction Complete!",
+            description: `Wash for ${finalTransaction.licensePlate} has been recorded.`,
+        });
+
+    } catch (error: any) {
+        // Create and emit a detailed, contextual error for the dev overlay
+        const permissionError = new FirestorePermissionError({
+          path: 'transactions', // This is the collection path
+          operation: 'create',
+          requestResourceData: newTransactionData,
+        });
+        errorEmitter.emit('permission-error', permissionError);
+
+        // Show a user-friendly toast. The dev overlay will have the details.
+        toast({ 
+            title: "Transaction Failed", 
+            description: "Could not save the transaction. Check the console for details.", 
+            variant: "destructive" 
+        });
+    } finally {
+        setIsSubmitting(false);
+    }
+  };
+
+  const handlePhotoCaptured = async (imageDataUri: string) => {
+    setIsCameraOpen(false);
+    if (cameraMode === 'capture') {
+        setVehiclePhotoUri(imageDataUri);
+        toast({ title: "Photo captured!" });
+    } else if (cameraMode === 'scan') {
+        setIsScanning(true);
+        toast({ title: "Scanning License Plate...", description: "This might take a moment." });
+        try {
+            const res = await fetch('/api/scan-plate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ photoDataUri: imageDataUri }),
+            });
+            const result = res.ok ? await res.json() : null;
+            if (result && result.licensePlate) {
+                vehicleForm.setValue('licensePlate', result.licensePlate);
+                toast({
+                    title: "Scan Successful!",
+                    description: `License plate set to ${result.licensePlate}.`,
+                });
+            } else {
+                toast({
+                    variant: "destructive",
+                    title: "Scan Failed",
+                    description: "Could not read the license plate. Please try again or enter it manually.",
+                });
+            }
+        } catch (error) {
+            toast({
+                variant: "destructive",
+                title: "Scan Error",
+                description: "An unexpected error occurred during the scan.",
+            });
+        } finally {
+            setIsScanning(false);
+        }
+    }
+};
+
+const handleShareReceipt = async () => {
+    if (!transaction || !currentVehicle?.phoneNumber) return;
+
+    // 1. Generate the receipt text using WhatsApp formatting
+    const servicesText = transaction.services
+      .map(s => `- ${s.name}: ${formatCurrency(s.price)}`)
+      .join('\n');
+
+    const receiptText = `*Tee-DOT Car Care Express*\n---------------------------\n*OFFICIAL RECEIPT*\n\nReceipt ID: ${transaction.id}\nDate: ${new Date(transaction.timestamp).toLocaleString()}\nLicense Plate: ${transaction.licensePlate}\n\n*Services:*\n${servicesText}\n\n---------------------------\n*TOTAL: ${formatCurrency(transaction.totalAmount)}*\nPayment Method: ${transaction.payment.method}\nStatus: ${transaction.status}\n---------------------------\n\nThank you for your business!`;
+
+    // 2. URL-encode the text
+    const encodedText = encodeURIComponent(receiptText);
+
+    // 3. Create the WhatsApp URL
+    const phoneNumber = currentVehicle.phoneNumber.replace(/[+\s]/g, '');
+    const whatsappUrl = `https://wa.me/${phoneNumber}?text=${encodedText}`;
+    
+    // 4. Open the URL in a new tab
+    window.open(whatsappUrl, '_blank');
+
+    toast({
+        title: "Redirecting to WhatsApp",
+        description: "Your receipt has been prepared. Please press 'Send' in WhatsApp.",
+    });
+  };
+
+  const handleVoidTransaction = async () => {
+    if (!transaction || !firestore || !user) return;
+    setIsVoiding(true);
+    try {
+      const transactionRef = doc(firestore, 'transactions', transaction.id);
+      await updateDoc(transactionRef, {
+        status: 'Voided',
+        voidedAt: serverTimestamp(),
+        voidedBy: user.uid,
+      });
+      setTransaction({ ...transaction, status: 'Voided' });
+      toast({ title: "Transaction Voided", description: `Transaction ${transaction.id} has been voided.`, variant: "destructive" });
+    } catch (error: any) {
+      toast({ title: "Error", description: "Could not void the transaction.", variant: "destructive" });
+    } finally {
+      setIsVoiding(false);
+      setIsVoidDialogOpen(false);
+    }
+  };
+
+
+  const startNew = () => {
+    vehicleForm.reset({ licensePlate: "" });
+    newVehicleForm.reset({ licensePlate: "", type: "Sedan", ownerName: "", phoneNumber: "" });
+    servicesForm.reset({ selectedServices: [], assignedWashers: [] });
+    paymentForm.reset({ paymentMethod: "Cash", reference: "" });
+    setCurrentVehicle(null);
+    setTransaction(null);
+    setVehiclePhotoUri(null);
+    setIsNewVehicleSaved(false);
+    setIsVoidDialogOpen(false);
+    setCustomerInfo(null);
+    setStep("vehicle");
+  };
+  
+  const motionProps = {
+    initial: { opacity: 0, x: 50 },
+    animate: { opacity: 1, x: 0 },
+    exit: { opacity: 0, x: -50 },
+    transition: { duration: 0.3 }
+  };
+
+  const renderStep = () => {
+    switch (step) {
+      case "vehicle":
+        return (
+          <motion.div {...motionProps}>
+          <Card>
+            <CardHeader>
+              <CardTitle>1. Vehicle Identification</CardTitle>
+              <CardDescription>Enter the vehicle's license plate or scan it.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Form {...vehicleForm}>
+                <form onSubmit={vehicleForm.handleSubmit(handleVehicleSubmit)} className="space-y-4">
+                  <FormField
+                    control={vehicleForm.control}
+                    name="licensePlate"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>License Plate</FormLabel>
+                        <div className="relative">
+                            <FormControl>
+                            <Input placeholder="e.g., ABC 1234" {...field} />
+                            </FormControl>
+                            <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="absolute right-1 top-1 h-8 w-8"
+                            onClick={() => {
+                                setCameraMode('scan');
+                                setIsCameraOpen(true);
+                            }}
+                            disabled={isScanning}
+                            >
+                            {isScanning ? <Loader2 className="animate-spin" /> : <Camera className="size-5" />}
+                            <span className="sr-only">Scan License Plate</span>
+                            </Button>
+                        </div>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <Button type="submit" disabled={isScanning || isFindingVehicle || isLoadingServices}>
+                    {isFindingVehicle && <Loader2 className="animate-spin mr-2" />}
+                    {isFindingVehicle ? 'Finding...' : 'Find Vehicle'}
+                     <ChevronRight className="ml-2" />
+                  </Button>
+                </form>
+              </Form>
+            </CardContent>
+          </Card>
+          </motion.div>
+        );
+      case "new-vehicle":
+        return (
+            <motion.div {...motionProps}>
+            <Card>
+            <CardHeader>
+              <CardTitle>Register New Vehicle</CardTitle>
+              <CardDescription>This license plate is not in our system. Please add the vehicle details.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Form {...newVehicleForm}>
+                <form onSubmit={newVehicleForm.handleSubmit(handleNewVehicleSubmit)} className="space-y-4">
+                   <div className="space-y-2">
+                      <FormLabel>Vehicle Photo</FormLabel>
+                      <Card>
+                          <CardContent className="p-2">
+                              <div className="aspect-video w-full bg-muted rounded-md flex items-center justify-center overflow-hidden">
+                                  {vehiclePhotoUri ? (
+                                      <img src={vehiclePhotoUri} alt="Vehicle" className="h-full w-full object-cover rounded-md" />
+                                  ) : (
+                                      <ImageIcon className="size-12 text-muted-foreground" />
+                                  )}
+                              </div>
+                          </CardContent>
+                          <CardFooter className="p-2 pt-0">
+                              <Button type="button" variant="outline" className="w-full" onClick={() => {
+                                  setCameraMode('capture');
+                                  setIsCameraOpen(true);
+                              }}
+                              disabled={isSubmitting || isNewVehicleSaved}>
+                                  <Camera className="mr-2" /> {vehiclePhotoUri ? 'Retake' : 'Capture'} Photo
+                              </Button>
+                          </CardFooter>
+                      </Card>
+                  </div>
+
+                  <FormField control={newVehicleForm.control} name="licensePlate" render={({ field }) => (
+                    <FormItem><FormLabel>License Plate</FormLabel><FormControl><Input {...field} disabled /></FormControl><FormMessage /></FormItem>
+                  )}/>
+                  <FormField control={newVehicleForm.control} name="type" render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Vehicle Type</FormLabel>
+                      <Select onValueChange={field.onChange} defaultValue={field.value} disabled={isSubmitting || isNewVehicleSaved}>
+                        <FormControl><SelectTrigger><SelectValue placeholder="Select vehicle type" /></SelectTrigger></FormControl>
+                        <SelectContent>
+                          <SelectItem value="Sedan">Sedan</SelectItem>
+                          <SelectItem value="SUV">SUV</SelectItem>
+                          <SelectItem value="Truck">Truck</SelectItem>
+                          <SelectItem value="Minibus">Minibus</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}/>
+                  <FormField control={newVehicleForm.control} name="ownerName" render={({ field }) => (
+                    <FormItem><FormLabel>Owner Name (Optional)</FormLabel><FormControl><Input placeholder="John Doe" {...field} disabled={isSubmitting || isNewVehicleSaved}/></FormControl><FormMessage /></FormItem>
+                  )}/>
+                   <FormField control={newVehicleForm.control} name="phoneNumber" render={({ field }) => (
+                    <FormItem><FormLabel>Phone Number (for WhatsApp)</FormLabel><FormControl><Input placeholder="260977123456" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                  )}/>
+                  <div className="flex gap-2">
+                    <Button type="button" variant="outline" onClick={() => setStep("vehicle")} disabled={isSubmitting || isNewVehicleSaved}>
+                      <ChevronLeft className="mr-2" />Back
+                    </Button>
+                    {!isNewVehicleSaved ? (
+                        <Button type="submit" disabled={isSubmitting}>
+                            {isSubmitting && <Loader2 className="mr-2 animate-spin" />}
+                            Register Vehicle
+                        </Button>
+                    ) : (
+                        <Button onClick={() => setStep("services")}>
+                            Continue to Services <ChevronRight className="ml-2" />
+                        </Button>
+                    )}
+                  </div>
+                </form>
+              </Form>
+            </CardContent>
+          </Card>
+          </motion.div>
+        );
+      case "services":
+        const selectedIds = servicesForm.watch("selectedServices");
+        const selected = allServices?.filter(s => selectedIds.includes(s.id)) || [];
+        const total = selected.reduce((acc, s) => acc + s.price, 0);
+
+        return (
+            <motion.div {...motionProps} className="grid md:grid-cols-3 gap-6">
+                <div className="md:col-span-2">
+                    <Card>
+                        <CardHeader>
+                            <CardTitle>2. Select Services</CardTitle>
+                            <CardDescription>Choose the services for {currentVehicle?.licensePlate}.</CardDescription>
+                        </CardHeader>
+                        <CardContent>
+                        <Form {...servicesForm}>
+                            <form onSubmit={servicesForm.handleSubmit(handleServicesSubmit)}>
+                                <FormField control={servicesForm.control} name="assignedWashers" render={({ field }) => (
+                                    <FormItem className="mb-6">
+                                        <FormLabel>Assigned Washers (Points are split equally)</FormLabel>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-2">
+                                            {allWashers?.map(w => (
+                                                 <FormField key={w.id} control={servicesForm.control} name="assignedWashers" render={({ field: subField }) => {
+                                                    return (
+                                                        <FormItem key={w.id} className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-3 shadow-sm cursor-pointer hover:border-primary transition-colors">
+                                                            <FormControl>
+                                                                <Checkbox 
+                                                                    checked={subField.value?.includes(w.id)}
+                                                                    onCheckedChange={(checked) => {
+                                                                        return checked
+                                                                            ? subField.onChange([...subField.value, w.id])
+                                                                            : subField.onChange(subField.value?.filter((value) => value !== w.id))
+                                                                    }}
+                                                                />
+                                                            </FormControl>
+                                                            <FormLabel className="font-medium cursor-pointer w-full text-sm">
+                                                                {w.name}
+                                                            </FormLabel>
+                                                        </FormItem>
+                                                    )
+                                                 }} />
+                                            ))}
+                                            {allWashers?.length === 0 && <p className="text-muted-foreground text-sm col-span-full">No washers available</p>}
+                                        </div>
+                                        <FormMessage />
+                                    </FormItem>
+                                )} />
+                                <FormField control={servicesForm.control} name="selectedServices" render={({ field }) => (
+                                    <FormItem className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        {isLoadingServices && <>
+                                          <Skeleton className="h-24 w-full" />
+                                          <Skeleton className="h-24 w-full" />
+                                        </>}
+                                        {allServices?.map((service) => (
+                                        <FormField key={service.id} control={servicesForm.control} name="selectedServices" render={({ field }) => (
+                                            <FormItem className="flex flex-row items-center space-x-3 space-y-0">
+                                            <Card className={`w-full cursor-pointer hover:border-primary transition-colors ${field.value?.includes(service.id) ? "border-primary border-2" : ""}`}>
+                                                <CardContent className="p-4">
+                                                    <FormControl>
+                                                        <Checkbox className="hidden" checked={field.value?.includes(service.id)} onCheckedChange={(checked) => {
+                                                            return checked ? field.onChange([...field.value, service.id]) : field.onChange(field.value?.filter((value) => value !== service.id));
+                                                        }} />
+                                                    </FormControl>
+                                                    <FormLabel className="font-normal w-full flex items-center justify-between cursor-pointer">
+                                                        <div className="flex items-center gap-3">
+                                                            {serviceIcons[service.name] || <Car className="h-6 w-6 text-primary" />}
+                                                            <span className="text-lg font-medium">{service.name}</span>
+                                                        </div>
+                                                        <span className="text-lg font-bold">{formatCurrency(service.price)}</span>
+                                                    </FormLabel>
+                                                </CardContent>
+                                            </Card>
+                                            </FormItem>
+                                        )} />
+                                    ))}
+                                    <FormMessage className="col-span-full" />
+                                </FormItem>
+                                )}/>
+                            </form>
+                        </Form>
+                        </CardContent>
+                    </Card>
+                </div>
+                <div className="md:col-span-1">
+                    <Card className="sticky top-20">
+                        <CardHeader>
+                          <CardTitle>Order Summary</CardTitle>
+                          {customerInfo && (
+                            <div className="flex items-center gap-2 mt-1">
+                              <Trophy className="h-4 w-4 text-amber-500" />
+                              <span className="text-sm font-medium">{customerInfo.name}</span>
+                              <Badge variant="outline" className={
+                                customerInfo.tier === 'Platinum' ? 'border-purple-400 text-purple-600' :
+                                customerInfo.tier === 'Gold' ? 'border-amber-400 text-amber-600' :
+                                customerInfo.tier === 'Silver' ? 'border-slate-400 text-slate-600' :
+                                'border-orange-300 text-orange-700'
+                              }>
+                                {customerInfo.tier} · {customerInfo.totalPoints} pts
+                              </Badge>
+                            </div>
+                          )}
+                        </CardHeader>
+                        <CardContent className="space-y-4">
+                            {selected.length > 0 ? selected.map(s => (
+                                <div key={s.id} className="flex justify-between"><span>{s.name}</span><span className="font-medium">{formatCurrency(s.price)}</span></div>
+                            )) : <p className="text-muted-foreground">No services selected.</p>}
+                            <Separator />
+                            <div className="flex justify-between text-xl font-bold"><span>Total</span><span>{formatCurrency(total)}</span></div>
+                        </CardContent>
+                        <CardFooter className="flex flex-col gap-2">
+                            <Button className="w-full" onClick={servicesForm.handleSubmit(handleServicesSubmit)} disabled={selected.length === 0}>
+                                Proceed to Payment <ChevronRight className="ml-2" />
+                            </Button>
+                            <Button className="w-full" variant="outline" onClick={() => setStep("vehicle")}><ChevronLeft className="mr-2" />Change Vehicle</Button>
+                        </CardFooter>
+                    </Card>
+                </div>
+            </motion.div>
+        );
+      case "payment":
+        const paymentTotal = allServices?.filter(s => servicesForm.getValues("selectedServices").includes(s.id)).reduce((acc, s) => acc + s.price, 0) || 0;
+        const watchPaymentMethod = paymentForm.watch("paymentMethod");
+        return (
+            <motion.div {...motionProps}>
+            <Card>
+                <CardHeader>
+                    <CardTitle>3. Payment</CardTitle>
+                    <CardDescription>Total amount: <span className="font-bold text-lg text-primary">{formatCurrency(paymentTotal)}</span></CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <Form {...paymentForm}>
+                        <form onSubmit={paymentForm.handleSubmit(handlePaymentSubmit)} className="space-y-6">
+                            <FormField control={paymentForm.control} name="paymentMethod" render={({ field }) => (
+                                <FormItem className="space-y-3"><FormLabel>Payment Method</FormLabel>
+                                <FormControl>
+                                    <RadioGroup onValueChange={field.onChange} defaultValue={field.value} className="flex flex-col space-y-1">
+                                    <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Cash" /></FormControl><FormLabel className="font-normal">Cash</FormLabel></FormItem>
+                                    <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Mobile Money" /></FormControl><FormLabel className="font-normal">Mobile Money</FormLabel></FormItem>
+                                    <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Corporate Account" /></FormControl><FormLabel className="font-normal">Corporate Account (Bill Later)</FormLabel></FormItem>
+                                    </RadioGroup>
+                                </FormControl><FormMessage />
+                                </FormItem>
+                            )}/>
+
+                            {(watchPaymentMethod === "Mobile Money" || watchPaymentMethod === "Corporate Account") && (
+                                <FormField control={paymentForm.control} name="reference" render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>
+                                            {watchPaymentMethod === "Mobile Money" ? "MoMo Transaction Reference" : "Invoice / PO Reference"}
+                                        </FormLabel>
+                                        <FormControl>
+                                            <Input
+                                                placeholder={watchPaymentMethod === "Mobile Money" ? "e.g. 1234567890" : "e.g. INV-001"}
+                                                {...field}
+                                            />
+                                        </FormControl>
+                                        <FormDescription>
+                                            {watchPaymentMethod === "Mobile Money"
+                                                ? "Enter the transaction reference from the customer's MoMo confirmation."
+                                                : "Reference for billing purposes."}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}/>
+                            )}
+
+                            <div className="flex gap-2">
+                                <Button type="button" variant="outline" onClick={() => setStep("services")}><ChevronLeft className="mr-2" />Back to Services</Button>
+                                <Button type="submit" disabled={isSubmitting}>
+                                  {isSubmitting && <Loader2 className="animate-spin mr-2" />}
+                                  Complete Transaction
+                                  <Check className="ml-2" />
+                                </Button>
+                            </div>
+                        </form>
+                    </Form>
+                </CardContent>
+            </Card>
+            </motion.div>
+        );
+      case "receipt":
+        return (
+            <motion.div {...motionProps}>
+            <Card className="max-w-md mx-auto">
+                <CardHeader className="text-center">
+                    <div className={`mx-auto rounded-full h-16 w-16 flex items-center justify-center ${transaction?.status === 'Pending Payment' ? 'bg-amber-100' : 'bg-accent'}`}>
+                        {transaction?.status === 'Pending Payment'
+                          ? <Loader2 className="h-10 w-10 text-amber-600" />
+                          : <Check className="h-10 w-10 text-accent-foreground" />}
+                    </div>
+                    <CardTitle className="mt-4">
+                        {transaction?.status === 'Pending Payment' ? 'Billed to Account' : 'Transaction Complete'}
+                    </CardTitle>
+                    <CardDescription>Receipt ID: {transaction?.id}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                   {currentVehicle?.photoDataUri && (
+                     <div className="rounded-md overflow-hidden border">
+                        <img src={currentVehicle.photoDataUri} alt="Vehicle" className="aspect-video w-full object-cover" />
+                     </div>
+                   )}
+                    <div className="space-y-2 rounded-md border p-4">
+                        <div className="flex justify-between"><span className="text-muted-foreground">License Plate</span><span className="font-medium">{transaction?.licensePlate}</span></div>
+                        <div className="flex justify-between"><span className="text-muted-foreground">Date</span><span className="font-medium">{transaction ? new Date(transaction.timestamp).toLocaleString() : ''}</span></div>
+                    </div>
+                    <div className="space-y-2">
+                        <h4 className="font-medium">Services Rendered</h4>
+                        {transaction?.services.map(s => (
+                            <div key={s.id} className="flex justify-between"><span>{s.name}</span><span>{formatCurrency(s.price)}</span></div>
+                        ))}
+                    </div>
+                    <Separator />
+                    <div className="flex justify-between font-bold text-lg"><span >Total Paid</span><span>{formatCurrency(transaction?.totalAmount || 0)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Payment Method</span><span>{transaction?.payment.method}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Status</span><span className={transaction?.status === 'Pending Payment' ? 'text-amber-600 font-medium' : 'text-green-600 font-medium'}>{transaction?.status}</span></div>
+                    {transaction?.payment.reference && (
+                        <div className="flex justify-between text-sm">
+                            <span className="text-muted-foreground">Reference</span>
+                            <span className="font-mono text-xs">{transaction.payment.reference}</span>
+                        </div>
+                    )}
+                </CardContent>
+                <CardFooter className="flex flex-col gap-2">
+                    {transaction && transaction.status !== 'Voided' && (
+                        <Button
+                            className="w-full"
+                            variant="outline"
+                            onClick={handleShareReceipt}
+                            disabled={!currentVehicle?.phoneNumber}
+                        >
+                            <Share2 className="mr-2" /> Share to WhatsApp
+                        </Button>
+                    )}
+                    {!currentVehicle?.phoneNumber && transaction && transaction.status !== 'Voided' && (
+                        <p className="text-xs text-muted-foreground text-center px-4">
+                            Add a phone number to the vehicle to enable WhatsApp sharing.
+                        </p>
+                    )}
+                    {transaction && transaction.status !== 'Voided' && user?.profile?.role === 'Admin' && (
+                        <Button
+                            className="w-full"
+                            variant="destructive"
+                            onClick={() => setIsVoidDialogOpen(true)}
+                            disabled={isVoiding}
+                        >
+                            <Ban className="mr-2" /> Void Transaction
+                        </Button>
+                    )}
+                    <Button className="w-full" onClick={startNew}>Start New Wash <ChevronRight className="ml-2" /></Button>
+                </CardFooter>
+            </Card>
+            </motion.div>
+        );
+    }
+  };
+  
+  return (
+    <>
+      <AnimatePresence mode="wait">{renderStep()}</AnimatePresence>
+      <AnimatePresence>
+      {isCameraOpen && (
+        <VehicleCamera
+          onCapture={handlePhotoCaptured}
+          onClose={() => setIsCameraOpen(false)}
+        />
+      )}
+      </AnimatePresence>
+
+      <AlertDialog open={isVoidDialogOpen} onOpenChange={setIsVoidDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Void this transaction?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will mark transaction {transaction?.id} as Voided and exclude it from revenue reports. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isVoiding}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleVoidTransaction}
+              disabled={isVoiding}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isVoiding && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Void Transaction
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
+    
+
+    
+
+
+
+    
+
+    

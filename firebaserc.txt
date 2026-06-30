@@ -1,0 +1,2 @@
+DEPRECATED — superseded by the real .firebaserc file in this directory.
+(This OneDrive folder blocks file deletion, so this placeholder is left as a note.)
