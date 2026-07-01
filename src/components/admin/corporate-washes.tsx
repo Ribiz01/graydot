@@ -8,7 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Badge } from '../ui/badge';
 import { Skeleton } from '../ui/skeleton';
 import { Button } from '../ui/button';
-import { collection, query, where, orderBy, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, doc, updateDoc } from 'firebase/firestore';
 import { useFirestore, useMemoFirebase } from '@/firebase';
 import { useUser } from '@/firebase/auth/use-user';
 import type { Transaction } from '@/lib/types';
@@ -25,15 +25,22 @@ export function CorporateWashes() {
 
   const transactionsQuery = useMemoFirebase(() => {
     if (!firestore || !user) return null;
+    // No orderBy here — combining where+orderBy on different fields needs a composite
+    // Firestore index. We sort client-side to avoid that requirement.
     return query(
       collection(firestore, 'transactions'),
       where('payment.method', '==', 'Corporate Account'),
-      orderBy('timestamp', 'desc')
     );
   }, [firestore, user]);
 
-  const { data: transactions, isLoading: areTransactionsLoading } = useCollection<Transaction>(transactionsQuery);
+  const { data: rawTransactions, isLoading: areTransactionsLoading } = useCollection<Transaction>(transactionsQuery);
   const isLoading = isUserLoading || areTransactionsLoading;
+
+  // Sort newest-first in the browser
+  const transactions = useMemo(
+    () => rawTransactions ? [...rawTransactions].sort((a, b) => b.timestamp.localeCompare(a.timestamp)) : null,
+    [rawTransactions]
+  );
 
   const pending = useMemo(() => transactions?.filter(t => t.status === 'Pending Payment') ?? [], [transactions]);
   const completed = useMemo(() => transactions?.filter(t => t.status === 'Completed') ?? [], [transactions]);
