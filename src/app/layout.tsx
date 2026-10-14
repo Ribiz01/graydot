@@ -14,8 +14,8 @@ const ptSans = PT_Sans({
 });
 
 export const metadata: Metadata = {
-  title: 'Tee-DOT Car Care Express',
-  description: 'Tee-DOT Car Care Express — car wash management and point of sale.',
+  title: 'Graydot Carwash & Auto Detailing',
+  description: 'Graydot Carwash & Auto Detailing — car wash management and point of sale.',
   manifest: '/manifest.json',
 };
 

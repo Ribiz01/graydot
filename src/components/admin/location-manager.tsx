@@ -176,7 +176,7 @@ export function LocationManager() {
                   <FormItem>
                     <FormLabel>Branch Name</FormLabel>
                     <FormControl>
-                      <Input placeholder="e.g., Tee-DOT Woodlands" {...field} />
+                      <Input placeholder="e.g., Graydot Woodlands" {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>

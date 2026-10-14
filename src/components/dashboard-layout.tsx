@@ -2,7 +2,7 @@
 
 import React, { useEffect } from "react";
 import { useUser } from "@/firebase/auth/use-user";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Car,
   Home,
@@ -15,6 +15,7 @@ import {
   Wrench,
   HardHat,
   Briefcase,
+  Wallet,
 } from "lucide-react";
 import {
   SidebarProvider,
@@ -45,12 +46,14 @@ const adminNav = [
 
 const attendantNav = [
   { href: "/dashboard", icon: Car, label: "New Wash" },
+  { href: "/dashboard/summary", icon: Wallet, label: "My Shift" },
 ];
 
 export function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { user, logout, isLoading } = useUser();
   const router = useRouter();
-  const currentPath = typeof window !== 'undefined' ? window.location.pathname : '';
+  // usePathname (not window.location) so the active item updates on client-side navigation.
+  const currentPath = usePathname();
 
   useEffect(() => {
     if (!isLoading && !user) {

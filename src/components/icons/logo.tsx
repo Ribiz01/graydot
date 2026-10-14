@@ -1,15 +1,12 @@
 import { cn } from "@/lib/utils";
-import Image from "next/image";
 
 export function Logo({ className }: { className?: string }) {
   return (
-    <Image
-      src="/icons/logo.png"
-      alt="Tee-Dot Car Care Express"
-      width={240}
-      height={120}
-      className={cn("object-contain w-auto", className)}
-      priority
-    />
+    <span className={cn("flex flex-col justify-center leading-none", className)}>
+      <span className="text-lg font-black tracking-[0.16em]">GRAYDOT</span>
+      <span className="mt-1 text-[0.55rem] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+        Carwash &amp; Auto Detailing
+      </span>
+    </span>
   );
 }

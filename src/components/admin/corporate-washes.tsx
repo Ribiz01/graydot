@@ -90,7 +90,7 @@ export function CorporateWashes() {
           {rows.map(t => {
             const waPhone = t.customerPhone?.replace(/[+\s]/g, '');
             const waLink = waPhone
-              ? `https://wa.me/${waPhone.startsWith('0') ? '260' + waPhone.slice(1) : waPhone}?text=${encodeURIComponent(`Hi ${t.customerName ?? ''}, this is a reminder that your car wash payment of ${formatCurrency(t.totalAmount)} (Ref: ${t.payment.reference ?? 'N/A'}) is outstanding. Please settle at your earliest convenience. — Tee-Dot Car Care`)}`
+              ? `https://wa.me/${waPhone.startsWith('0') ? '260' + waPhone.slice(1) : waPhone}?text=${encodeURIComponent(`Hi ${t.customerName ?? ''}, this is a reminder that your car wash payment of ${formatCurrency(t.totalAmount)} (Ref: ${t.payment.reference ?? 'N/A'}) is outstanding. Please settle at your earliest convenience. — Graydot Carwash & Auto Detailing`)}`
               : null;
 
             return (

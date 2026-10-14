@@ -1,6 +1,6 @@
-# PRD — Tee-DOT Car Care Express (Zambia)
+# PRD — Graydot Carwash & Auto Detailing (Zambia)
 
-**Product:** Tee-DOT Car Care Express — multi-branch car care management PWA
+**Product:** Graydot Carwash & Auto Detailing — multi-branch car care management PWA
 **Platform:** Next.js 15 (App Router) + React 19 + TypeScript · Tailwind CSS + shadcn/ui · Firebase · Genkit (Gemini) · Mobile-first PWA
 **Market:** Zambia (currency ZMW / ngwe, Zambian plates, local mobile money & SMS)
 **Reference implementation:** [Ribiz01/spillway-car-wash](https://github.com/Ribiz01/spillway-car-wash)
@@ -207,7 +207,7 @@ Firebase **App Check (reCAPTCHA v3)**; error logging (`window.onerror`/`onunhand
 
 ## 8. Tech stack (as built in the reference repo)
 
-This section now reflects the **actual stack of the [spillway-car-wash](https://github.com/Ribiz01/spillway-car-wash) repo**, which is the implementation of record for Tee-DOT Car Care Express:
+This section now reflects the **actual stack of the [spillway-car-wash](https://github.com/Ribiz01/spillway-car-wash) repo**, which is the implementation of record for Graydot Carwash & Auto Detailing:
 
 **Core:** Next.js 15 (App Router) + React 19 + TypeScript · Tailwind CSS + **shadcn/ui** (Radix primitives) · **Firebase 11** (Auth, Firestore, Storage, App Hosting; Cloud Functions when needed) · **Genkit + @genkit-ai/google-genai** (Gemini — powers AI license-plate scanning).
 

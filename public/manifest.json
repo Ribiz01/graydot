@@ -1,7 +1,7 @@
 {
-  "name": "Tee-DOT Car Care Express",
-  "short_name": "Tee-DOT",
-  "description": "Tee-DOT Car Care Express — car wash management and point of sale.",
+  "name": "Graydot Carwash & Auto Detailing",
+  "short_name": "Graydot",
+  "description": "Graydot Carwash & Auto Detailing — car wash management and point of sale.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

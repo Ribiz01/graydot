@@ -284,7 +284,7 @@ export function UserManager() {
                 <FormItem><FormLabel>Full Name</FormLabel><FormControl><Input placeholder="John Doe" {...field} /></FormControl><FormMessage /></FormItem>
               )}/>
               <FormField control={form.control} name="email" render={({ field }) => (
-                <FormItem><FormLabel>Email</FormLabel><FormControl><Input type="email" placeholder="user@teedot.com" {...field} disabled={!!editingUser} /></FormControl><FormMessage /></FormItem>
+                <FormItem><FormLabel>Email</FormLabel><FormControl><Input type="email" placeholder="user@graydot.com" {...field} disabled={!!editingUser} /></FormControl><FormMessage /></FormItem>
               )}/>
               <FormField control={form.control} name="role" render={({ field }) => (
                 <FormItem>

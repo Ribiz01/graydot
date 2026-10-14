@@ -347,7 +347,7 @@ const handleShareReceipt = async () => {
       .map(s => `- ${s.name}: ${formatCurrency(s.price)}`)
       .join('\n');
 
-    const receiptText = `*Tee-DOT Car Care Express*\n---------------------------\n*OFFICIAL RECEIPT*\n\nReceipt ID: ${transaction.id}\nDate: ${new Date(transaction.timestamp).toLocaleString()}\nLicense Plate: ${transaction.licensePlate}\n\n*Services:*\n${servicesText}\n\n---------------------------\n*TOTAL: ${formatCurrency(transaction.totalAmount)}*\nPayment Method: ${transaction.payment.method}\nStatus: ${transaction.status}\n---------------------------\n\nThank you for your business!`;
+    const receiptText = `*Graydot Carwash & Auto Detailing*\n---------------------------\n*OFFICIAL RECEIPT*\n\nReceipt ID: ${transaction.id}\nDate: ${new Date(transaction.timestamp).toLocaleString()}\nLicense Plate: ${transaction.licensePlate}\n\n*Services:*\n${servicesText}\n\n---------------------------\n*TOTAL: ${formatCurrency(transaction.totalAmount)}*\nPayment Method: ${transaction.payment.method}\nStatus: ${transaction.status}\n---------------------------\n\nThank you for your business!`;
 
     // 2. URL-encode the text
     const encodedText = encodeURIComponent(receiptText);

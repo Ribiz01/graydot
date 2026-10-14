@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { TrendingUp, Users, Star, FileText } from "lucide-react";
+import { TrendingDown, TrendingUp, Users, Star, FileText } from "lucide-react";
 import {
   ChartContainer,
   ChartTooltip,
@@ -52,23 +52,61 @@ const barConfig = {
   revenue: { label: "Revenue", color: "hsl(var(--chart-2))" },
 } satisfies ChartConfig;
 
+const monthlyConfig = {
+  revenue: { label: "Revenue", color: "hsl(var(--chart-2))" },
+  washes: { label: "Completed washes", color: "hsl(var(--primary))" },
+} satisfies ChartConfig;
+
 function isoDate(d: Date) {
   return d.toISOString().split("T")[0];
 }
 
-function periodRange(period: "day" | "week" | "month"): { start: string; end: string } {
-  const today = new Date();
-  if (period === "day") {
-    return { start: isoDate(today), end: isoDate(today) };
-  }
-  if (period === "week") {
-    const mon = new Date(today);
-    mon.setDate(today.getDate() - today.getDay() + (today.getDay() === 0 ? -6 : 1));
-    return { start: isoDate(mon), end: isoDate(today) };
-  }
-  // month
-  const first = new Date(today.getFullYear(), today.getMonth(), 1);
-  return { start: isoDate(first), end: isoDate(today) };
+function monthKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function localDateString(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function monthLabel(key: string) {
+  const [year, month] = key.split("-").map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function monthWindows(key: string) {
+  const [year, month] = key.split("-").map(Number);
+  const now = new Date();
+  const isCurrentMonth = key === monthKey(now);
+  const start = new Date(year, month - 1, 1);
+  const end = isCurrentMonth ? now : new Date(year, month, 0, 23, 59, 59, 999);
+  const comparisonStart = new Date(year, month - 2, 1);
+  const comparisonEnd = isCurrentMonth
+    ? new Date(
+        comparisonStart.getFullYear(),
+        comparisonStart.getMonth(),
+        Math.min(now.getDate(), new Date(comparisonStart.getFullYear(), comparisonStart.getMonth() + 1, 0).getDate()),
+        now.getHours(),
+        now.getMinutes(),
+        now.getSeconds(),
+        now.getMilliseconds(),
+      )
+    : new Date(year, month - 1, 0, 23, 59, 59, 999);
+  const trendStart = new Date(year, month - 12, 1);
+
+  return { start, end, comparisonStart, comparisonEnd, trendStart };
+}
+
+function changeLabel(current: number, previous: number) {
+  if (previous === 0) return current > 0 ? "New vs previous month" : "No change vs previous month";
+  const change = ((current - previous) / previous) * 100;
+  return `${change > 0 ? "+" : ""}${change.toFixed(1)}% vs previous month`;
+}
+
+function changeClass(current: number, previous: number, lowerIsBetter = false) {
+  if (current === previous) return "text-muted-foreground";
+  const movedInPreferredDirection = lowerIsBetter ? current < previous : current > previous;
+  return movedInPreferredDirection ? "text-emerald-600" : "text-destructive";
 }
 
 function exportPdf(
@@ -117,7 +155,7 @@ function exportPdf(
 </style>
 </head>
 <body>
-<h1>Tee-Dot Car Care Express — Revenue Report</h1>
+<h1>Graydot Carwash & Auto Detailing — Revenue Report</h1>
 <p class="sub">Period: ${dateLabel} &nbsp;|&nbsp; ${txCount} completed transaction${txCount !== 1 ? "s" : ""}</p>
 
 <h2>Revenue Summary</h2>
@@ -157,7 +195,7 @@ function exportPdf(
   </tbody>
 </table>
 
-<div class="footer">Generated ${new Date().toLocaleString()} — Tee-Dot Car Care Express</div>
+<div class="footer">Generated ${new Date().toLocaleString()} — Graydot Carwash & Auto Detailing</div>
 <script>window.onload = () => window.print();</script>
 </body>
 </html>`;
@@ -171,31 +209,37 @@ function exportPdf(
 
 export function ReportsDashboard() {
   const firestore = useFirestore();
-  const [startDate, setStartDate] = useState<string>(() => {
-    const d = new Date(); d.setDate(1);
-    return isoDate(d);
-  });
-  const [endDate, setEndDate] = useState<string>(() => isoDate(new Date()));
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => monthKey(new Date()));
+  const maxMonth = monthKey(new Date());
+  const reportWindow = useMemo(() => monthWindows(selectedMonth), [selectedMonth]);
 
-  const setQuickPeriod = (p: "day" | "week" | "month") => {
-    const { start, end } = periodRange(p);
-    setStartDate(start);
-    setEndDate(end);
-  };
-
-  // ── Transactions ─────────────────────────────────────────────────────────────
+  // ── Transactions for the selected month and the 12-month trend ───────────────
   const txQuery = useMemoFirebase(() => {
     if (!firestore) return null;
-    const start = new Date(startDate); start.setHours(0, 0, 0, 0);
-    const end   = new Date(endDate);   end.setHours(23, 59, 59, 999);
     return query(
       collection(firestore, "transactions"),
-      where("timestamp", ">=", start.toISOString()),
-      where("timestamp", "<=", end.toISOString()),
+      where("timestamp", ">=", reportWindow.trendStart.toISOString()),
+      where("timestamp", "<=", reportWindow.end.toISOString()),
       orderBy("timestamp", "desc")
     );
-  }, [firestore, startDate, endDate]);
-  const { data: transactions, isLoading: txLoading } = useCollection<Transaction>(txQuery);
+  }, [firestore, reportWindow]);
+  const { data: reportTransactions, isLoading: txLoading } = useCollection<Transaction>(txQuery);
+
+  const transactions = useMemo(
+    () => (reportTransactions ?? []).filter(transaction => {
+      const timestamp = new Date(transaction.timestamp).getTime();
+      return timestamp >= reportWindow.start.getTime() && timestamp <= reportWindow.end.getTime();
+    }),
+    [reportTransactions, reportWindow]
+  );
+
+  const previousTransactions = useMemo(
+    () => (reportTransactions ?? []).filter(transaction => {
+      const timestamp = new Date(transaction.timestamp).getTime();
+      return timestamp >= reportWindow.comparisonStart.getTime() && timestamp <= reportWindow.comparisonEnd.getTime();
+    }),
+    [reportTransactions, reportWindow]
+  );
 
   // ── Customers ────────────────────────────────────────────────────────────────
   const custQuery = useMemoFirebase(
@@ -205,12 +249,35 @@ export function ReportsDashboard() {
   const { data: customers, isLoading: custLoading } = useCollection<Customer>(custQuery);
 
   // ── Derived stats ─────────────────────────────────────────────────────────────
-  const completed = useMemo(() => (transactions ?? []).filter(t => t.status === "Completed"), [transactions]);
+  const completed = useMemo(() => transactions.filter(t => t.status === "Completed"), [transactions]);
+  const previousCompleted = useMemo(
+    () => previousTransactions.filter(t => t.status === "Completed"),
+    [previousTransactions]
+  );
 
   const totalRevenue  = useMemo(() => completed.reduce((a, t) => a + t.totalAmount, 0), [completed]);
+  const previousRevenue = useMemo(() => previousCompleted.reduce((a, t) => a + t.totalAmount, 0), [previousCompleted]);
   const cashTotal     = useMemo(() => completed.filter(t => t.payment.method === "Cash").reduce((a, t) => a + t.totalAmount, 0), [completed]);
   const momoTotal     = useMemo(() => completed.filter(t => t.payment.method === "Mobile Money").reduce((a, t) => a + t.totalAmount, 0), [completed]);
   const corpTotal     = useMemo(() => completed.filter(t => t.payment.method === "Corporate Account").reduce((a, t) => a + t.totalAmount, 0), [completed]);
+  const previousCashTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Cash").reduce((a, t) => a + t.totalAmount, 0), [previousCompleted]);
+  const previousMomoTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Mobile Money").reduce((a, t) => a + t.totalAmount, 0), [previousCompleted]);
+  const previousCorpTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Corporate Account").reduce((a, t) => a + t.totalAmount, 0), [previousCompleted]);
+
+  const monthlyStats = useMemo(() => {
+    const months = Array.from({ length: 12 }, (_, index) => {
+      const date = new Date(reportWindow.start.getFullYear(), reportWindow.start.getMonth() - 11 + index, 1);
+      return { key: monthKey(date), label: date.toLocaleDateString(undefined, { month: "short", year: "2-digit" }), revenue: 0, washes: 0 };
+    });
+    const monthByKey = new Map(months.map(month => [month.key, month]));
+    for (const transaction of reportTransactions ?? []) {
+      const month = monthByKey.get(monthKey(new Date(transaction.timestamp)));
+      if (!month || transaction.status !== "Completed") continue;
+      month.revenue += transaction.totalAmount;
+      month.washes += 1;
+    }
+    return months;
+  }, [reportTransactions, reportWindow]);
 
   const serviceStats = useMemo(() => {
     const map: Record<string, { count: number; revenue: number }> = {};
@@ -235,31 +302,63 @@ export function ReportsDashboard() {
 
   const topByVisits = useMemo(() => (customers ?? []).slice(0, 10), [customers]);
   const topBySpend  = useMemo(() => [...(customers ?? [])].sort((a, b) => (b.totalSpendNgwe ?? 0) - (a.totalSpendNgwe ?? 0)).slice(0, 10), [customers]);
+  const uniqueVehicles = useMemo(
+    () => new Set(completed.map(transaction => transaction.licensePlate.trim().toUpperCase()).filter(Boolean)).size,
+    [completed]
+  );
+  const completionRate = transactions.length > 0 ? completed.length / transactions.length * 100 : 0;
+  const previousCompletionRate = previousTransactions.length > 0 ? previousCompleted.length / previousTransactions.length * 100 : 0;
+  const averageTicket = completed.length > 0 ? totalRevenue / completed.length : 0;
+  const previousAverageTicket = previousCompleted.length > 0 ? previousRevenue / previousCompleted.length : 0;
+  const pendingCount = transactions.filter(transaction => transaction.status === "Pending Payment").length;
+  const previousPendingCount = previousTransactions.filter(transaction => transaction.status === "Pending Payment").length;
+  const voidedCount = transactions.filter(transaction => transaction.status === "Voided").length;
+  const previousVoidedCount = previousTransactions.filter(transaction => transaction.status === "Voided").length;
+  const comparisonData = [
+    { label: "Revenue", value: totalRevenue, previous: previousRevenue, formatter: formatCurrency },
+    { label: "Completed washes", value: completed.length, previous: previousCompleted.length, formatter: (value: number) => value.toLocaleString() },
+    { label: "Average ticket", value: averageTicket, previous: previousAverageTicket, formatter: formatCurrency },
+    { label: "Completion rate", value: completionRate, previous: previousCompletionRate, formatter: (value: number) => `${value.toFixed(1)}%` },
+    { label: "Transactions recorded", value: transactions.length, previous: previousTransactions.length, formatter: (value: number) => value.toLocaleString() },
+    { label: "Pending payment", value: pendingCount, previous: previousPendingCount, formatter: (value: number) => value.toLocaleString(), lowerIsBetter: true },
+    { label: "Voided transactions", value: voidedCount, previous: previousVoidedCount, formatter: (value: number) => value.toLocaleString(), lowerIsBetter: true },
+  ];
+  const reportStartDate = localDateString(reportWindow.start);
+  const reportEndDate = localDateString(reportWindow.end);
 
   return (
     <div className="space-y-6">
       {/* Header + controls */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold tracking-tight">Reports</h1>
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Business Reports</h1>
+          <p className="text-sm text-muted-foreground">Performance, month-over-month movement, and business KPIs.</p>
+        </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" onClick={() => setQuickPeriod("day")}>Today</Button>
-          <Button size="sm" variant="outline" onClick={() => setQuickPeriod("week")}>This Week</Button>
-          <Button size="sm" variant="outline" onClick={() => setQuickPeriod("month")}>This Month</Button>
-          <Input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-[140px]" />
-          <span className="text-muted-foreground text-sm">to</span>
-          <Input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="w-[140px]" />
+          <label htmlFor="report-month" className="text-sm text-muted-foreground">Report month</label>
+          <Input
+            id="report-month"
+            type="month"
+            value={selectedMonth}
+            max={maxMonth}
+            onChange={event => setSelectedMonth(event.target.value)}
+            className="w-[170px]"
+          />
           <Button
             size="sm"
             variant="default"
-            onClick={() => exportPdf(startDate, endDate, serviceStats, totalRevenue, cashTotal, momoTotal, corpTotal, completed.length)}
+            onClick={() => exportPdf(reportStartDate, reportEndDate, serviceStats, totalRevenue, cashTotal, momoTotal, corpTotal, completed.length)}
           >
             <FileText className="h-4 w-4 mr-1" /> Export PDF
           </Button>
         </div>
       </div>
 
-      <Tabs defaultValue="services">
-        <TabsList className="grid w-full grid-cols-2 max-w-md">
+      <Tabs defaultValue="overview">
+        <TabsList className="grid w-full grid-cols-3 max-w-xl">
+          <TabsTrigger value="overview" className="flex items-center gap-2">
+            <TrendingUp className="h-4 w-4" /> Business Overview
+          </TabsTrigger>
           <TabsTrigger value="services" className="flex items-center gap-2">
             <TrendingUp className="h-4 w-4" /> Service Analysis
           </TabsTrigger>
@@ -268,31 +367,133 @@ export function ReportsDashboard() {
           </TabsTrigger>
         </TabsList>
 
-        {/* ── SERVICE ANALYSIS ───────────────────────────────────────────────── */}
-        <TabsContent value="services" className="space-y-6 mt-4">
+        {/* ── BUSINESS OVERVIEW ──────────────────────────────────────────────── */}
+        <TabsContent value="overview" className="space-y-6 mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>{monthLabel(selectedMonth)} at a glance</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                {selectedMonth === maxMonth
+                  ? "Month-to-date compared with the same dates last month."
+                  : "Full month compared with the previous full month."}
+              </p>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              {comparisonData.map(metric => (
+                <div key={metric.label} className="rounded-lg border p-4">
+                  <p className="text-sm font-medium text-muted-foreground">{metric.label}</p>
+                  {txLoading ? <Skeleton className="mt-2 h-8 w-32" /> : (
+                    <p className="mt-2 text-2xl font-bold">{metric.formatter(metric.value)}</p>
+                  )}
+                  <p className={`mt-1 flex items-center gap-1 text-xs ${changeClass(metric.value, metric.previous, metric.lowerIsBetter)}`}>
+                    {!txLoading && (metric.value >= metric.previous
+                      ? <TrendingUp className="h-3.5 w-3.5" />
+                      : <TrendingDown className="h-3.5 w-3.5" />)}
+                    {metric.label === "Completion rate"
+                      ? `${(metric.value - metric.previous) > 0 ? "+" : ""}${(metric.value - metric.previous).toFixed(1)} percentage points vs previous month`
+                      : changeLabel(metric.value, metric.previous)}
+                  </p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
 
-          {/* Revenue summary cards */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {[
-              { label: "Total Revenue", value: totalRevenue, sub: `${completed.length} transactions` },
-              { label: "Cash", value: cashTotal, sub: totalRevenue > 0 ? `${((cashTotal / totalRevenue) * 100).toFixed(1)}% of total` : "—" },
-              { label: "Mobile Money", value: momoTotal, sub: totalRevenue > 0 ? `${((momoTotal / totalRevenue) * 100).toFixed(1)}% of total` : "—" },
-              { label: "Corporate (Collected)", value: corpTotal, sub: totalRevenue > 0 ? `${((corpTotal / totalRevenue) * 100).toFixed(1)}% of total` : "—" },
-            ].map(card => (
-              <Card key={card.label}>
+              { label: "Unique vehicles", value: uniqueVehicles.toLocaleString(), sub: "Vehicles served this month" },
+              { label: "Transactions recorded", value: transactions.length.toLocaleString(), sub: "Completed, pending, and voided" },
+              { label: "Pending payment", value: pendingCount.toLocaleString(), sub: "Awaiting payment" },
+              { label: "Voided transactions", value: voidedCount.toLocaleString(), sub: "Excluded from revenue" },
+              { label: "Cash revenue", value: formatCurrency(cashTotal), sub: totalRevenue > 0 ? `${(cashTotal / totalRevenue * 100).toFixed(1)}% of revenue` : "No completed revenue" },
+              { label: "Mobile money revenue", value: formatCurrency(momoTotal), sub: totalRevenue > 0 ? `${(momoTotal / totalRevenue * 100).toFixed(1)}% of revenue` : "No completed revenue" },
+              { label: "Corporate revenue", value: formatCurrency(corpTotal), sub: totalRevenue > 0 ? `${(corpTotal / totalRevenue * 100).toFixed(1)}% of revenue` : "No completed revenue" },
+            ].map(metric => (
+              <Card key={metric.label}>
                 <CardHeader className="pb-1">
-                  <CardTitle className="text-sm font-medium text-muted-foreground">{card.label}</CardTitle>
+                  <CardTitle className="text-sm font-medium text-muted-foreground">{metric.label}</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  {txLoading
-                    ? <Skeleton className="h-8 w-28" />
-                    : <div className="text-2xl font-bold">{formatCurrency(card.value)}</div>}
-                  <p className="text-xs text-muted-foreground mt-1">{card.sub}</p>
+                  {txLoading ? <Skeleton className="h-8 w-28" /> : <p className="text-2xl font-bold">{metric.value}</p>}
+                  <p className="mt-1 text-xs text-muted-foreground">{metric.sub}</p>
                 </CardContent>
               </Card>
             ))}
           </div>
 
+          <Card>
+            <CardHeader>
+              <CardTitle>12-month business trend</CardTitle>
+              <p className="text-sm text-muted-foreground">Completed-wash revenue and volume by month.</p>
+            </CardHeader>
+            <CardContent>
+              {txLoading ? <Skeleton className="h-[300px] w-full" /> : (
+                <ChartContainer config={monthlyConfig} className="min-h-[300px] w-full">
+                  <BarChart accessibilityLayer data={monthlyStats}>
+                    <CartesianGrid vertical={false} />
+                    <XAxis dataKey="label" tickLine={false} tickMargin={8} axisLine={false} />
+                    <YAxis yAxisId="revenue" tickFormatter={value => formatCurrency(Number(value))} />
+                    <YAxis yAxisId="washes" orientation="right" allowDecimals={false} />
+                    <ChartTooltip
+                      content={<ChartTooltipContent formatter={(value, name) => [
+                        name === "revenue" ? formatCurrency(Number(value)) : Number(value).toLocaleString(),
+                        name === "revenue" ? "Revenue" : "Completed washes",
+                      ]} />}
+                    />
+                    <Bar yAxisId="revenue" dataKey="revenue" fill="var(--color-revenue)" radius={4} />
+                    <Bar yAxisId="washes" dataKey="washes" fill="var(--color-washes)" radius={4} />
+                  </BarChart>
+                </ChartContainer>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle>Month-over-month comparison</CardTitle></CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>KPI</TableHead>
+                    <TableHead className="text-right">{selectedMonth === maxMonth ? "Month to date" : monthLabel(selectedMonth)}</TableHead>
+                    <TableHead className="text-right">{selectedMonth === maxMonth ? "Previous month to date" : monthLabel(monthKey(reportWindow.comparisonStart))}</TableHead>
+                    <TableHead className="text-right">Change</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {comparisonData.map(metric => (
+                    <TableRow key={metric.label}>
+                      <TableCell className="font-medium">{metric.label}</TableCell>
+                      <TableCell className="text-right">{metric.formatter(metric.value)}</TableCell>
+                      <TableCell className="text-right">{metric.formatter(metric.previous)}</TableCell>
+                      <TableCell className={`text-right font-semibold ${changeClass(metric.value, metric.previous, metric.lowerIsBetter)}`}>
+                        {metric.label === "Completion rate"
+                          ? `${(metric.value - metric.previous) > 0 ? "+" : ""}${(metric.value - metric.previous).toFixed(1)} pp`
+                          : changeLabel(metric.value, metric.previous)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  <TableRow>
+                    <TableCell className="font-medium">Unique vehicles</TableCell>
+                    <TableCell className="text-right">{uniqueVehicles}</TableCell>
+                    <TableCell className="text-right">
+                      {new Set(previousCompleted.map(transaction => transaction.licensePlate.trim().toUpperCase()).filter(Boolean)).size}
+                    </TableCell>
+                    <TableCell className="text-right text-muted-foreground">—</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium">Cash / Mobile money / Corporate</TableCell>
+                    <TableCell className="text-right">{formatCurrency(cashTotal)} / {formatCurrency(momoTotal)} / {formatCurrency(corpTotal)}</TableCell>
+                    <TableCell className="text-right">{formatCurrency(previousCashTotal)} / {formatCurrency(previousMomoTotal)} / {formatCurrency(previousCorpTotal)}</TableCell>
+                    <TableCell className="text-right text-muted-foreground">See payment mix above</TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ── SERVICE ANALYSIS ───────────────────────────────────────────────── */}
+        <TabsContent value="services" className="space-y-6 mt-4">
           {/* Charts */}
           <div className="grid gap-6 md:grid-cols-2">
             <Card>
