@@ -55,9 +55,12 @@ export interface AppUser extends FirebaseUser {
 export interface Vehicle {
   id?: string;
   licensePlate: string;
+  make?: string;
+  model?: string;
   type: 'Sedan' | 'SUV' | 'Truck' | 'Minibus';
   ownerName?: string;
   phoneNumber?: string;
+  whatsappReceiptConsent?: boolean;
   photoDataUri?: string;
 }
 
@@ -68,8 +71,10 @@ export interface Service {
   price: number;
 }
 
-export type PaymentMethod = 'Cash' | 'Mobile Money' | 'Corporate Account';
+export type PaymentMethod = 'Cash' | 'Airtel Money' | 'Mobile Money' | 'Bank Transfer' | 'Other' | 'Corporate Account';
 export type TransactionStatus = 'Completed' | 'Pending Payment' | 'Voided';
+export type WashStatus = 'In Progress' | 'Awaiting Collection' | 'Collected';
+export type ReceiptDeliveryStatus = 'Pending' | 'Sent' | 'Failed';
 
 export interface Payment {
   method: PaymentMethod;
@@ -85,11 +90,22 @@ export interface Transaction {
   /** Server-authoritative time (serverTimestamp). Use this for trusted ordering/reporting. */
   createdAt?: Timestamp | FieldValue;
   licensePlate: string;
+  vehicleMake?: string;
+  vehicleModel?: string;
+  vehiclePhotoDataUri?: string;
+  bayNumber?: string;
+  startedAt?: string;
+  completedAt?: string;
+  collectedAt?: string;
+  washDurationSeconds?: number;
+  washStatus?: WashStatus;
   /** Each service price is in ngwe. */
   services: { id: string; name: string; price: number; }[];
   /** Total in ngwe. */
   totalAmount: number;
   payment: Payment;
+  amountPaid?: number;
+  outstandingBalance?: number;
   userId: string;
   locationId?: string;
   locationName?: string;
@@ -100,14 +116,42 @@ export interface Transaction {
   /** Denormalised from vehicle record for easy corporate tracking. */
   customerName?: string;
   customerPhone?: string;
+  corporateCompanyId?: string;
+  corporateCompanyName?: string;
+  whatsappReceiptConsent?: boolean;
   voidedAt?: Timestamp | FieldValue;
   voidedBy?: string;
   receiptUrl?: string;
+  receiptDeliveryStatus?: ReceiptDeliveryStatus;
+  receiptDeliveryError?: string;
+}
+
+export type ExpensePaymentSource = 'Cash' | 'Airtel Money' | 'Mobile Money' | 'Bank Transfer' | 'Other';
+
+export interface Expense {
+  id: string;
+  date: string;
+  description: string;
+  amount: number;
+  paymentSource: ExpensePaymentSource;
+  userId: string;
+  locationId?: string;
+  locationName?: string;
+  createdAt?: Timestamp | FieldValue;
 }
 
 export interface Washer {
   id: string;
   name: string;
+}
+
+export interface CorporateCompany {
+  id: string;
+  name: string;
+  contactPerson?: string;
+  contactPhone?: string;
+  contactEmail?: string;
+  active: boolean;
 }
 
     

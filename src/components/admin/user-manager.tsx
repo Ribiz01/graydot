@@ -204,9 +204,9 @@ export function UserManager() {
   return (
     <>
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
           <CardTitle>All Users</CardTitle>
-          <Button onClick={() => handleDialogOpen(null)}>
+          <Button className="w-full sm:w-auto" onClick={() => handleDialogOpen(null)}>
             <PlusCircle className="mr-2 h-4 w-4" /> Add New User
           </Button>
         </CardHeader>

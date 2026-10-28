@@ -17,6 +17,10 @@ export const metadata: Metadata = {
   title: 'Graydot Carwash & Auto Detailing',
   description: 'Graydot Carwash & Auto Detailing — car wash management and point of sale.',
   manifest: '/manifest.json',
+  icons: {
+    icon: '/icons/icon-192x192.png',
+    apple: '/icons/apple-touch-icon.png',
+  },
 };
 
 export default function RootLayout({
@@ -27,8 +31,7 @@ export default function RootLayout({
   return (
     <html lang="en" className={ptSans.variable} suppressHydrationWarning>
       <head>
-        <meta name="theme-color" content="#2f95dc" />
-        <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+        <meta name="theme-color" content="#276351" />
       </head>
       <body className="font-body antialiased">
         <FirebaseClientProvider>

@@ -99,7 +99,12 @@ service cloud.firestore {
     match /vehicles/{vehicleId} {
       allow get, list: if isSignedIn();
       allow create: if isSignedIn();
-      allow update, delete: if isAdmin() && isExistingDoc();
+      allow update: if isAdmin() && isExistingDoc()
+        || isSignedIn() && isExistingDoc()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'make', 'model', 'phoneNumber', 'whatsappReceiptConsent', 'photoDataUri'
+          ]);
+      allow delete: if isAdmin() && isExistingDoc();
     }
 
     /**
@@ -130,6 +135,19 @@ service cloud.firestore {
       allow create: if isSignedIn();
       allow update: if isSignedIn();
       allow delete: if isAdmin();
+    }
+
+    match /corporate_companies/{companyId} {
+      allow get, list: if isSignedIn();
+      allow create: if isAdmin();
+      allow update, delete: if isAdmin() && isExistingDoc();
+    }
+
+    match /expenses/{expenseId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin() && isExistingDoc() && request.resource.data.userId == resource.data.userId;
+      allow delete: if isAdmin() && isExistingDoc();
     }
 
     /**

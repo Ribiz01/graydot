@@ -3,12 +3,12 @@
 import { useMemo, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useCollection } from '@/firebase/firestore/use-collection';
-import { formatCurrency } from '@/lib/utils';
+import { formatCurrency, getAmountReceived, getOutstandingBalance } from '@/lib/utils';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Badge } from '../ui/badge';
 import { Skeleton } from '../ui/skeleton';
 import { Button } from '../ui/button';
-import { collection, query, where, doc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, doc, updateDoc, writeBatch, serverTimestamp } from 'firebase/firestore';
 import { useFirestore, useMemoFirebase } from '@/firebase';
 import { useUser } from '@/firebase/auth/use-user';
 import type { Transaction } from '@/lib/types';
@@ -46,14 +46,36 @@ export function CorporateWashes() {
   const completed = useMemo(() => transactions?.filter(t => t.status === 'Completed') ?? [], [transactions]);
   const voided = useMemo(() => transactions?.filter(t => t.status === 'Voided') ?? [], [transactions]);
 
-  const outstandingTotal = useMemo(() => pending.reduce((acc, t) => acc + t.totalAmount, 0), [pending]);
-  const paidTotal = useMemo(() => completed.reduce((acc, t) => acc + t.totalAmount, 0), [completed]);
+  const outstandingTotal = useMemo(() => pending.reduce((total, transaction) => total + getOutstandingBalance(transaction), 0), [pending]);
+  const paidTotal = useMemo(() => completed.reduce((total, transaction) => total + getAmountReceived(transaction), 0), [completed]);
 
   const handleMarkPaid = async (t: Transaction) => {
     if (!firestore) return;
     setMarkingPaid(t.id);
     try {
-      await updateDoc(doc(firestore, 'transactions', t.id), { status: 'Completed' });
+      const batch = writeBatch(firestore);
+      batch.update(doc(firestore, 'transactions', t.id), {
+        status: 'Completed',
+        amountPaid: t.totalAmount,
+        outstandingBalance: 0,
+        payment: { ...t.payment, amount: t.totalAmount },
+      });
+      batch.set(doc(firestore, 'receipts', t.id), {
+        transactionId: t.id,
+        licensePlate: t.licensePlate,
+        corporateCompanyId: t.corporateCompanyId || '',
+        corporateCompanyName: t.corporateCompanyName || '',
+        services: t.services,
+        totalAmount: t.totalAmount,
+        paymentMethod: t.payment.method,
+        status: 'Completed',
+        amountPaid: t.totalAmount,
+        userId: t.userId,
+        customerPhone: t.customerPhone || '',
+        deliveryStatus: t.receiptDeliveryStatus || 'Pending',
+        paidAt: serverTimestamp(),
+      }, { merge: true });
+      await batch.commit();
       toast({ title: "Marked as Paid", description: `${t.licensePlate} — ${formatCurrency(t.totalAmount)}` });
     } catch {
       toast({ title: "Error", description: "Could not update the transaction.", variant: "destructive" });
@@ -77,7 +99,7 @@ export function CorporateWashes() {
         <TableHeader>
           <TableRow>
             <TableHead>Date</TableHead>
-            <TableHead>Customer</TableHead>
+            <TableHead>Company / Customer</TableHead>
             <TableHead>License Plate</TableHead>
             <TableHead>Services</TableHead>
             <TableHead>Reference</TableHead>
@@ -99,9 +121,10 @@ export function CorporateWashes() {
                   {new Date(t.timestamp).toLocaleDateString()}
                 </TableCell>
                 <TableCell>
+                  {t.corporateCompanyName && <div className="font-medium">{t.corporateCompanyName}</div>}
                   {t.customerName
-                    ? <div className="font-medium">{t.customerName}</div>
-                    : <span className="text-muted-foreground text-sm">—</span>}
+                    ? <div className="text-sm">{t.customerName}</div>
+                    : !t.corporateCompanyName && <span className="text-muted-foreground text-sm">—</span>}
                   {t.customerPhone && (
                     <div className="flex items-center gap-1 mt-0.5">
                       <Phone className="h-3 w-3 text-muted-foreground" />

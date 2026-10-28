@@ -2,12 +2,12 @@
   "name": "Graydot Carwash & Auto Detailing",
   "short_name": "Graydot",
   "description": "Graydot Carwash & Auto Detailing — car wash management and point of sale.",
-  "start_url": "/",
+  "start_url": "/login",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#ffffff",
-  "theme_color": "#2f95dc",
+  "background_color": "#f5f7f6",
+  "theme_color": "#276351",
   "icons": [
     {
       "src": "/icons/icon-192x192.png",
@@ -27,5 +27,6 @@
       "type": "image/png",
       "purpose": "maskable"
     }
-  ]
+  ],
+  "categories": ["business", "productivity"]
 }

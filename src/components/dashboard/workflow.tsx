@@ -28,7 +28,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
-import type { Service, Vehicle, Transaction, UserProfile, Washer, Customer, CustomerTier } from "@/lib/types";
+import type { Service, Vehicle, Transaction, Washer, Customer, CorporateCompany } from "@/lib/types";
 import { calcPointsEarned, calcTier } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -43,31 +43,41 @@ const vehicleSchema = z.object({
 
 const newVehicleSchema = z.object({
   licensePlate: z.string().min(3).toUpperCase(),
+  make: z.string().min(1, "Vehicle make is required"),
+  model: z.string().min(1, "Vehicle model is required"),
   type: z.enum(["Sedan", "SUV", "Truck", "Minibus"]),
   ownerName: z.string().optional(),
-  phoneNumber: z.string().optional(),
+  phoneNumber: z.string().min(7, "Enter a customer phone number for receipt delivery."),
+  whatsappReceiptConsent: z.boolean().refine(value => value, "Customer consent is required for WhatsApp receipt delivery."),
 });
 
 const servicesSchema = z.object({
   selectedServices: z.array(z.string()).min(1, "Please select at least one service."),
   assignedWashers: z.array(z.string()).min(1, "Please select at least one washer."),
+  bayNumber: z.string().min(1, "Bay number is required."),
 });
 
 const paymentSchema = z.object({
-    paymentMethod: z.enum(["Cash", "Mobile Money", "Corporate Account"]),
+    paymentMethod: z.enum(["Cash", "Airtel Money", "Mobile Money", "Bank Transfer", "Other", "Corporate Account"]),
     reference: z.string().optional(),
+    corporateCompanyId: z.string().optional(),
 }).refine((data) => {
-    if (data.paymentMethod === 'Mobile Money' || data.paymentMethod === 'Corporate Account') {
+    if (data.paymentMethod === 'Airtel Money' || data.paymentMethod === 'Mobile Money' || data.paymentMethod === 'Bank Transfer' || data.paymentMethod === 'Corporate Account') {
         return (data.reference ?? '').trim().length > 0;
     }
     return true;
 }, {
     message: "A reference number is required",
     path: ["reference"],
+}).refine((data) => {
+    return data.paymentMethod !== "Corporate Account" || Boolean(data.corporateCompanyId);
+}, {
+    message: "Select the company to bill.",
+    path: ["corporateCompanyId"],
 });
 
 
-type Step = "vehicle" | "new-vehicle" | "services" | "payment" | "receipt";
+type Step = "vehicle" | "new-vehicle" | "services" | "washing" | "payment" | "receipt";
 
 const serviceIcons: { [key: string]: React.ReactNode } = {
     'Exterior Wash': <Droplets className="h-6 w-6 text-primary" />,
@@ -77,6 +87,8 @@ const serviceIcons: { [key: string]: React.ReactNode } = {
     'Tire Shine': <Disc className="h-6 w-6 text-primary" />,
     'Full Detail': <Star className="h-6 w-6 text-primary" />,
 };
+
+const suggestionsPhone = process.env.NEXT_PUBLIC_SUPPORT_PHONE || "Not configured";
 
 export function Workflow() {
   const [step, setStep] = useState<Step>("vehicle");
@@ -103,6 +115,17 @@ export function Workflow() {
   const washersQuery = useMemoFirebase(() => firestore ? collection(firestore, 'washers') : null, [firestore]);
   const { data: allWashers, isLoading: isLoadingWashers } = useCollection<Washer>(washersQuery);
 
+  const corporateCompaniesQuery = useMemoFirebase(
+    () => firestore ? collection(firestore, "corporate_companies") : null,
+    [firestore]
+  );
+  const {
+    data: corporateCompanies,
+    isLoading: isLoadingCorporateCompanies,
+    error: corporateCompaniesError,
+  } = useCollection<CorporateCompany>(corporateCompaniesQuery);
+  const activeCorporateCompanies = corporateCompanies?.filter(company => company.active) ?? [];
+
   const vehicleForm = useForm<z.infer<typeof vehicleSchema>>({
     resolver: zodResolver(vehicleSchema),
     defaultValues: { licensePlate: "" },
@@ -112,20 +135,23 @@ export function Workflow() {
     resolver: zodResolver(newVehicleSchema),
     defaultValues: {
       licensePlate: "",
+      make: "",
+      model: "",
       type: "Sedan",
       ownerName: "",
       phoneNumber: "",
+      whatsappReceiptConsent: false,
     },
   });
 
   const servicesForm = useForm<z.infer<typeof servicesSchema>>({
     resolver: zodResolver(servicesSchema),
-    defaultValues: { selectedServices: [], assignedWashers: [] },
+    defaultValues: { selectedServices: [], assignedWashers: [], bayNumber: "" },
   });
 
   const paymentForm = useForm<z.infer<typeof paymentSchema>>({
     resolver: zodResolver(paymentSchema),
-    defaultValues: { paymentMethod: "Cash", reference: "" },
+    defaultValues: { paymentMethod: "Cash", reference: "", corporateCompanyId: "" },
   });
 
 
@@ -140,6 +166,21 @@ export function Workflow() {
       if (!querySnapshot.empty) {
         const found = { id: querySnapshot.docs[0].id, ...querySnapshot.docs[0].data() } as Vehicle;
         setCurrentVehicle(found);
+        if (!found.make || !found.model || !found.phoneNumber || !found.whatsappReceiptConsent || !found.photoDataUri) {
+          newVehicleForm.reset({
+            licensePlate: found.licensePlate,
+            make: found.make || "",
+            model: found.model || "",
+            type: found.type || "Sedan",
+            ownerName: found.ownerName || "",
+            phoneNumber: found.phoneNumber || "",
+            whatsappReceiptConsent: found.whatsappReceiptConsent || false,
+          });
+          setVehiclePhotoUri(found.photoDataUri || null);
+          setIsNewVehicleSaved(false);
+          setStep("new-vehicle");
+          return;
+        }
         // Look up loyalty profile by phone number
         if (found.phoneNumber) {
           const custQ = query(collection(firestore, 'customers'), where('phoneNumber', '==', found.phoneNumber));
@@ -167,12 +208,29 @@ export function Workflow() {
 
   const handleNewVehicleSubmit = async (data: z.infer<typeof newVehicleSchema>) => {
     if (!firestore) return;
+    if (!vehiclePhotoUri && !currentVehicle?.photoDataUri) {
+      toast({ title: "Vehicle photo required", description: "Capture a vehicle photo before continuing.", variant: "destructive" });
+      return;
+    }
     setIsSubmitting(true);
-    const newVehicle: Omit<Vehicle, 'id'> = { ...data, photoDataUri: vehiclePhotoUri || undefined };
+    const newVehicle: Omit<Vehicle, 'id'> = {
+      ...data,
+      ...((vehiclePhotoUri || currentVehicle?.photoDataUri) && { photoDataUri: vehiclePhotoUri || currentVehicle?.photoDataUri }),
+    };
     try {
         const vehicleRef = doc(firestore, 'vehicles', data.licensePlate);
-        await setDoc(vehicleRef, newVehicle);
-        const savedVehicle = { id: data.licensePlate, ...newVehicle };
+        if (currentVehicle) {
+          await updateDoc(vehicleRef, {
+            make: data.make,
+            model: data.model,
+            phoneNumber: data.phoneNumber,
+            whatsappReceiptConsent: data.whatsappReceiptConsent,
+            ...((vehiclePhotoUri || currentVehicle.photoDataUri) && { photoDataUri: vehiclePhotoUri || currentVehicle.photoDataUri }),
+          });
+        } else {
+          await setDoc(vehicleRef, newVehicle);
+        }
+        const savedVehicle = { ...currentVehicle, id: data.licensePlate, ...newVehicle };
         setCurrentVehicle(savedVehicle);
         toast({ title: "Vehicle Registered", description: `${data.licensePlate} has been saved.` });
         setIsNewVehicleSaved(true);
@@ -183,65 +241,115 @@ export function Workflow() {
     }
   };
 
-  const handleServicesSubmit = () => setStep("payment");
-
-  const handlePaymentSubmit = async (data: z.infer<typeof paymentSchema>) => {
+  const handleServicesSubmit = async (data: z.infer<typeof servicesSchema>) => {
     if (!currentVehicle || !user || !firestore || !allServices) return;
     setIsSubmitting(true);
-
-    const selectedIds = servicesForm.getValues("selectedServices");
-    const assignedWasherIds = servicesForm.getValues("assignedWashers");
+    const startedAt = new Date().toISOString();
+    const selectedServices = allServices.filter(service => data.selectedServices.includes(service.id));
+    const totalAmount = selectedServices.reduce((total, service) => total + service.price, 0);
     const assignedWashers = allWashers
-      ?.filter(w => assignedWasherIds.includes(w.id))
-      .map(w => ({ id: w.id, name: w.name })) || [];
-
-    const selectedServices = allServices.filter(s => selectedIds.includes(s.id));
-    const totalAmount = selectedServices.reduce((acc, s) => acc + s.price, 0);
-
-
-    const newTransactionData: Omit<Transaction, 'id'> = {
-      timestamp: new Date().toISOString(),
+      ?.filter(washer => data.assignedWashers.includes(washer.id))
+      .map(washer => ({ id: washer.id, name: washer.name })) || [];
+    const activeTransaction: Omit<Transaction, "id"> = {
+      timestamp: startedAt,
       createdAt: serverTimestamp(),
+      startedAt,
+      washStatus: "In Progress",
+      bayNumber: data.bayNumber.trim(),
       licensePlate: currentVehicle.licensePlate,
-      services: selectedServices.map(s => ({ id: s.id, name: s.name, price: s.price })),
-      totalAmount: totalAmount,
-      payment: {
-        method: data.paymentMethod,
-        reference: data.reference,
-        amount: totalAmount,
-      },
+      ...(currentVehicle.make && { vehicleMake: currentVehicle.make }),
+      ...(currentVehicle.model && { vehicleModel: currentVehicle.model }),
+      ...((currentVehicle.photoDataUri || vehiclePhotoUri) && { vehiclePhotoDataUri: currentVehicle.photoDataUri || vehiclePhotoUri || "" }),
+      services: selectedServices.map(service => ({ id: service.id, name: service.name, price: service.price })),
+      totalAmount,
+      amountPaid: 0,
+      outstandingBalance: totalAmount,
+      payment: { method: "Cash", amount: 0 },
       userId: user.uid,
       ...(user.profile?.locationId && {
         locationId: user.profile.locationId,
         locationName: user.profile.locationName ?? "",
       }),
       assignedWashers,
-      // Cash + Mobile Money = Completed immediately; Corporate = bill later
-      status: data.paymentMethod === 'Corporate Account' ? 'Pending Payment' : 'Completed',
-      // Denormalised so corporate page can show who hasn't paid without a vehicle join
+      status: "Pending Payment",
       ...(currentVehicle.ownerName && { customerName: currentVehicle.ownerName }),
       ...(currentVehicle.phoneNumber && { customerPhone: currentVehicle.phoneNumber }),
+      whatsappReceiptConsent: currentVehicle.whatsappReceiptConsent === true,
     };
-    
+
     try {
-        const docRef = await addDoc(collection(firestore, 'transactions'), newTransactionData);
-        const finalTransaction: Transaction = { id: docRef.id, ...newTransactionData };
+      const docRef = await addDoc(collection(firestore, "transactions"), activeTransaction);
+      setTransaction({ id: docRef.id, ...activeTransaction });
+      setStep("washing");
+    } catch (error: any) {
+      toast({ title: "Could not start wash", description: error.message || "The active wash was not saved.", variant: "destructive" });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handlePaymentSubmit = async (data: z.infer<typeof paymentSchema>) => {
+    if (!currentVehicle || !user || !firestore || !transaction) return;
+    const corporateCompany = data.corporateCompanyId
+      ? activeCorporateCompanies.find(company => company.id === data.corporateCompanyId)
+      : undefined;
+    if (data.paymentMethod === "Corporate Account" && !corporateCompany) {
+      toast({
+        title: "Select a corporate company",
+        description: "Choose an active company to bill before completing this wash.",
+        variant: "destructive",
+      });
+      return;
+    }
+    setIsSubmitting(true);
+    const completedAt = new Date().toISOString();
+    const amountPaid = data.paymentMethod === "Corporate Account" ? 0 : transaction.totalAmount;
+    const { id: transactionId, createdAt: _createdAt, ...transactionFields } = transaction;
+    const newTransactionData: Omit<Transaction, "id"> = {
+      ...transactionFields,
+      payment: { method: data.paymentMethod, reference: data.reference, amount: amountPaid },
+      amountPaid,
+      outstandingBalance: transaction.totalAmount - amountPaid,
+      status: data.paymentMethod === "Corporate Account" ? "Pending Payment" : "Completed",
+      washStatus: "Awaiting Collection",
+      completedAt,
+      washDurationSeconds: Math.max(0, Math.floor((Date.parse(completedAt) - Date.parse(transaction.startedAt || transaction.timestamp)) / 1000)),
+      receiptDeliveryStatus: currentVehicle.phoneNumber && currentVehicle.whatsappReceiptConsent ? "Pending" : "Failed",
+      ...(!currentVehicle.phoneNumber && { receiptDeliveryError: "Customer phone number is missing." }),
+      ...(currentVehicle.phoneNumber && !currentVehicle.whatsappReceiptConsent && { receiptDeliveryError: "Customer WhatsApp consent was not recorded." }),
+      ...(data.paymentMethod === "Corporate Account" && corporateCompany && {
+        corporateCompanyId: corporateCompany.id,
+        corporateCompanyName: corporateCompany.name,
+      }),
+    };
+
+    try {
+        await updateDoc(doc(firestore, "transactions", transaction.id), newTransactionData);
+        const finalTransaction: Transaction = { ...newTransactionData, id: transaction.id };
 
         // Write a durable receipt record (B7)
-        await setDoc(doc(firestore, 'receipts', docRef.id), {
-          transactionId: docRef.id,
+        await setDoc(doc(firestore, 'receipts', transactionId), {
+          transactionId: transaction.id,
           licensePlate: currentVehicle.licensePlate,
+          vehicleMake: currentVehicle.make || "",
+          vehicleModel: currentVehicle.model || "",
           services: newTransactionData.services,
           totalAmount: newTransactionData.totalAmount,
           paymentMethod: data.paymentMethod,
           status: newTransactionData.status,
           userId: user.uid,
+          customerPhone: currentVehicle.phoneNumber || "",
+          ...(finalTransaction.corporateCompanyId && {
+            corporateCompanyId: finalTransaction.corporateCompanyId,
+            corporateCompanyName: finalTransaction.corporateCompanyName || "",
+          }),
+          deliveryStatus: finalTransaction.receiptDeliveryStatus,
           createdAt: serverTimestamp(),
         });
 
         // Update customer loyalty points (only for Completed, cash or MoMo)
         if (newTransactionData.status === 'Completed' && currentVehicle.phoneNumber && currentVehicle.ownerName) {
-          const pointsEarned = calcPointsEarned(totalAmount);
+          const pointsEarned = calcPointsEarned(finalTransaction.totalAmount);
           const custQ = query(collection(firestore, 'customers'), where('phoneNumber', '==', currentVehicle.phoneNumber));
           const custSnap = await getDocs(custQ);
           if (custSnap.empty) {
@@ -252,7 +360,7 @@ export function Workflow() {
               phoneNumber: currentVehicle.phoneNumber,
               totalPoints: newPoints,
               totalVisits: 1,
-              totalSpendNgwe: totalAmount,
+              totalSpendNgwe: finalTransaction.totalAmount,
               tier: calcTier(newPoints),
               createdAt: serverTimestamp(),
               lastVisitAt: serverTimestamp(),
@@ -264,7 +372,7 @@ export function Workflow() {
             await updateDoc(custRef, {
               totalPoints: increment(pointsEarned),
               totalVisits: increment(1),
-              totalSpendNgwe: increment(totalAmount),
+              totalSpendNgwe: increment(finalTransaction.totalAmount),
               tier: calcTier(prevPoints),
               lastVisitAt: serverTimestamp(),
             });
@@ -273,6 +381,38 @@ export function Workflow() {
 
         setTransaction(finalTransaction);
         setStep("receipt");
+
+        if (currentVehicle.phoneNumber && currentVehicle.whatsappReceiptConsent) {
+          try {
+            const response = await fetch("/api/send-receipt", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${await user.getIdToken()}` },
+              body: JSON.stringify({ transactionId: finalTransaction.id }),
+            });
+            const result = await response.json();
+            const deliveryStatus = response.ok ? "Sent" : "Failed";
+            const deliveryError = response.ok ? "" : (result.error || "Receipt delivery failed.");
+            await updateDoc(doc(firestore, "transactions", transactionId), {
+              receiptDeliveryStatus: deliveryStatus,
+              receiptDeliveryError: deliveryError,
+            });
+            await updateDoc(doc(firestore, "receipts", transactionId), {
+              deliveryStatus,
+              deliveryError,
+              sentAt: response.ok ? serverTimestamp() : null,
+            });
+            setTransaction({ ...finalTransaction, receiptDeliveryStatus: deliveryStatus, receiptDeliveryError: deliveryError || undefined });
+          } catch (deliveryError) {
+            const message = deliveryError instanceof Error ? deliveryError.message : "Receipt delivery failed.";
+            try {
+              await updateDoc(doc(firestore, "transactions", transactionId), { receiptDeliveryStatus: "Failed", receiptDeliveryError: message });
+              await updateDoc(doc(firestore, "receipts", transactionId), { deliveryStatus: "Failed", deliveryError: message });
+            } catch {
+              // Keep the receipt screen usable if its status update is temporarily unavailable.
+            }
+            setTransaction({ ...finalTransaction, receiptDeliveryStatus: "Failed", receiptDeliveryError: message });
+          }
+        }
 
         toast({
             title: "Transaction Complete!",
@@ -343,11 +483,8 @@ const handleShareReceipt = async () => {
     if (!transaction || !currentVehicle?.phoneNumber) return;
 
     // 1. Generate the receipt text using WhatsApp formatting
-    const servicesText = transaction.services
-      .map(s => `- ${s.name}: ${formatCurrency(s.price)}`)
-      .join('\n');
-
-    const receiptText = `*Graydot Carwash & Auto Detailing*\n---------------------------\n*OFFICIAL RECEIPT*\n\nReceipt ID: ${transaction.id}\nDate: ${new Date(transaction.timestamp).toLocaleString()}\nLicense Plate: ${transaction.licensePlate}\n\n*Services:*\n${servicesText}\n\n---------------------------\n*TOTAL: ${formatCurrency(transaction.totalAmount)}*\nPayment Method: ${transaction.payment.method}\nStatus: ${transaction.status}\n---------------------------\n\nThank you for your business!`;
+    const servicesText = transaction.services.map(service => `- ${service.name}: ${formatCurrency(service.price)}`).join("\n");
+    const receiptText = `Graydot Carwash & Auto Detailing\nOFFICIAL RECEIPT\nReceipt ID: ${transaction.id}\nDate: ${new Date(transaction.timestamp).toLocaleString()}\nVehicle: ${transaction.vehicleMake || ""} ${transaction.vehicleModel || ""} (${transaction.licensePlate})\nServices:\n${servicesText}\nTotal: ${formatCurrency(transaction.totalAmount)}\nPaid: ${formatCurrency(transaction.amountPaid || 0)}\nOutstanding: ${formatCurrency(transaction.outstandingBalance || 0)}\nPayment: ${transaction.payment.method}\nSuggestions and complaints: ${suggestionsPhone}`;
 
     // 2. URL-encode the text
     const encodedText = encodeURIComponent(receiptText);
@@ -359,10 +496,45 @@ const handleShareReceipt = async () => {
     // 4. Open the URL in a new tab
     window.open(whatsappUrl, '_blank');
 
-    toast({
-        title: "Redirecting to WhatsApp",
-        description: "Your receipt has been prepared. Please press 'Send' in WhatsApp.",
-    });
+    toast({ title: "Receipt opened", description: "WhatsApp opened with the receipt. Confirm sending in WhatsApp." });
+  };
+
+  const handleResendReceipt = async () => {
+    if (!transaction || !currentVehicle?.phoneNumber || !currentVehicle.whatsappReceiptConsent || !firestore || !user) return;
+    setIsSubmitting(true);
+    try {
+      const response = await fetch("/api/send-receipt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${await user.getIdToken()}` },
+        body: JSON.stringify({ transactionId: transaction.id }),
+      });
+      const result = await response.json();
+      const deliveryStatus = response.ok ? "Sent" : "Failed";
+      const deliveryError = response.ok ? "" : (result.error || "Receipt delivery failed.");
+      await updateDoc(doc(firestore, "transactions", transaction.id), {
+        receiptDeliveryStatus: deliveryStatus,
+        receiptDeliveryError: deliveryError,
+      });
+      await updateDoc(doc(firestore, "receipts", transaction.id), {
+        deliveryStatus,
+        deliveryError,
+        sentAt: response.ok ? serverTimestamp() : null,
+      });
+      setTransaction({ ...transaction, receiptDeliveryStatus: deliveryStatus, receiptDeliveryError: deliveryError || undefined });
+      toast({ title: response.ok ? "Receipt sent" : "Receipt not sent", description: response.ok ? "WhatsApp accepted the receipt message." : deliveryError, variant: response.ok ? "default" : "destructive" });
+    } catch (error) {
+      const deliveryError = error instanceof Error ? error.message : "Receipt delivery failed.";
+      try {
+        await updateDoc(doc(firestore, "transactions", transaction.id), { receiptDeliveryStatus: "Failed", receiptDeliveryError: deliveryError });
+        await updateDoc(doc(firestore, "receipts", transaction.id), { deliveryStatus: "Failed", deliveryError });
+      } catch {
+        // Keep the resend result visible if persistence is temporarily unavailable.
+      }
+      setTransaction({ ...transaction, receiptDeliveryStatus: "Failed", receiptDeliveryError: deliveryError });
+      toast({ title: "Receipt not sent", description: deliveryError, variant: "destructive" });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleVoidTransaction = async () => {
@@ -388,9 +560,9 @@ const handleShareReceipt = async () => {
 
   const startNew = () => {
     vehicleForm.reset({ licensePlate: "" });
-    newVehicleForm.reset({ licensePlate: "", type: "Sedan", ownerName: "", phoneNumber: "" });
-    servicesForm.reset({ selectedServices: [], assignedWashers: [] });
-    paymentForm.reset({ paymentMethod: "Cash", reference: "" });
+    newVehicleForm.reset({ licensePlate: "", make: "", model: "", type: "Sedan", ownerName: "", phoneNumber: "", whatsappReceiptConsent: false });
+    servicesForm.reset({ selectedServices: [], assignedWashers: [], bayNumber: "" });
+    paymentForm.reset({ paymentMethod: "Cash", reference: "", corporateCompanyId: "" });
     setCurrentVehicle(null);
     setTransaction(null);
     setVehiclePhotoUri(null);
@@ -465,8 +637,8 @@ const handleShareReceipt = async () => {
             <motion.div {...motionProps}>
             <Card>
             <CardHeader>
-              <CardTitle>Register New Vehicle</CardTitle>
-              <CardDescription>This license plate is not in our system. Please add the vehicle details.</CardDescription>
+              <CardTitle>{currentVehicle ? "Complete Vehicle Details" : "Register New Vehicle"}</CardTitle>
+              <CardDescription>{currentVehicle ? "Add the missing make and model before continuing." : "This license plate is not in our system. Please add the vehicle details."}</CardDescription>
             </CardHeader>
             <CardContent>
               <Form {...newVehicleForm}>
@@ -498,6 +670,14 @@ const handleShareReceipt = async () => {
                   <FormField control={newVehicleForm.control} name="licensePlate" render={({ field }) => (
                     <FormItem><FormLabel>License Plate</FormLabel><FormControl><Input {...field} disabled /></FormControl><FormMessage /></FormItem>
                   )}/>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <FormField control={newVehicleForm.control} name="make" render={({ field }) => (
+                      <FormItem><FormLabel>Make</FormLabel><FormControl><Input placeholder="Toyota" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                    )}/>
+                    <FormField control={newVehicleForm.control} name="model" render={({ field }) => (
+                      <FormItem><FormLabel>Model</FormLabel><FormControl><Input placeholder="Corolla" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                    )}/>
+                  </div>
                   <FormField control={newVehicleForm.control} name="type" render={({ field }) => (
                     <FormItem>
                       <FormLabel>Vehicle Type</FormLabel>
@@ -516,8 +696,15 @@ const handleShareReceipt = async () => {
                   <FormField control={newVehicleForm.control} name="ownerName" render={({ field }) => (
                     <FormItem><FormLabel>Owner Name (Optional)</FormLabel><FormControl><Input placeholder="John Doe" {...field} disabled={isSubmitting || isNewVehicleSaved}/></FormControl><FormMessage /></FormItem>
                   )}/>
-                   <FormField control={newVehicleForm.control} name="phoneNumber" render={({ field }) => (
-                    <FormItem><FormLabel>Phone Number (for WhatsApp)</FormLabel><FormControl><Input placeholder="260977123456" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                  <FormField control={newVehicleForm.control} name="phoneNumber" render={({ field }) => (
+                    <FormItem><FormLabel>Customer Phone Number</FormLabel><FormControl><Input placeholder="260977123456" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                  )}/>
+                  <FormField control={newVehicleForm.control} name="whatsappReceiptConsent" render={({ field }) => (
+                    <FormItem className="flex flex-row items-start gap-3 space-y-0">
+                      <FormControl><Checkbox checked={field.value} onCheckedChange={field.onChange} disabled={isSubmitting || isNewVehicleSaved} /></FormControl>
+                      <FormLabel className="font-normal">Customer agrees to receive receipts by WhatsApp.</FormLabel>
+                      <FormMessage />
+                    </FormItem>
                   )}/>
                   <div className="flex gap-2">
                     <Button type="button" variant="outline" onClick={() => setStep("vehicle")} disabled={isSubmitting || isNewVehicleSaved}>
@@ -556,6 +743,13 @@ const handleShareReceipt = async () => {
                         <CardContent>
                         <Form {...servicesForm}>
                             <form onSubmit={servicesForm.handleSubmit(handleServicesSubmit)}>
+                                <FormField control={servicesForm.control} name="bayNumber" render={({ field }) => (
+                                  <FormItem className="mb-6 max-w-xs">
+                                    <FormLabel>Wash Bay</FormLabel>
+                                    <FormControl><Input placeholder="e.g. Bay 1" {...field} /></FormControl>
+                                    <FormMessage />
+                                  </FormItem>
+                                )} />
                                 <FormField control={servicesForm.control} name="assignedWashers" render={({ field }) => (
                                     <FormItem className="mb-6">
                                         <FormLabel>Assigned Washers (Points are split equally)</FormLabel>
@@ -603,11 +797,11 @@ const handleShareReceipt = async () => {
                                                         }} />
                                                     </FormControl>
                                                     <FormLabel className="font-normal w-full flex items-center justify-between cursor-pointer">
-                                                        <div className="flex items-center gap-3">
+                                                        <div className="flex min-w-0 items-center gap-3">
                                                             {serviceIcons[service.name] || <Car className="h-6 w-6 text-primary" />}
-                                                            <span className="text-lg font-medium">{service.name}</span>
+                                                            <span className="min-w-0 break-words text-base font-medium sm:text-lg">{service.name}</span>
                                                         </div>
-                                                        <span className="text-lg font-bold">{formatCurrency(service.price)}</span>
+                                                        <span className="shrink-0 whitespace-nowrap text-base font-bold sm:text-lg">{formatCurrency(service.price)}</span>
                                                     </FormLabel>
                                                 </CardContent>
                                             </Card>
@@ -649,14 +843,36 @@ const handleShareReceipt = async () => {
                             <div className="flex justify-between text-xl font-bold"><span>Total</span><span>{formatCurrency(total)}</span></div>
                         </CardContent>
                         <CardFooter className="flex flex-col gap-2">
-                            <Button className="w-full" onClick={servicesForm.handleSubmit(handleServicesSubmit)} disabled={selected.length === 0}>
-                                Proceed to Payment <ChevronRight className="ml-2" />
+                            <Button className="w-full" onClick={servicesForm.handleSubmit(handleServicesSubmit)} disabled={selected.length === 0 || isSubmitting}>
+                              {isSubmitting && <Loader2 className="mr-2 animate-spin" />}
+                              Start Wash <ChevronRight className="ml-2" />
                             </Button>
                             <Button className="w-full" variant="outline" onClick={() => setStep("vehicle")}><ChevronLeft className="mr-2" />Change Vehicle</Button>
                         </CardFooter>
                     </Card>
                 </div>
             </motion.div>
+        );
+      case "washing":
+        return (
+          <motion.div {...motionProps}>
+            <Card className="max-w-xl">
+              <CardHeader>
+                <CardTitle>Wash in Progress</CardTitle>
+                <CardDescription>{transaction?.licensePlate} · {transaction?.vehicleMake || "Vehicle"} {transaction?.vehicleModel || ""} · {transaction?.bayNumber}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p><span className="font-medium">Services:</span> {transaction?.services.map(service => service.name).join(", ")}</p>
+                <p><span className="font-medium">Attendant(s):</span> {transaction?.assignedWashers?.map(washer => washer.name).join(", ") || "—"}</p>
+                <p><span className="font-medium">Started:</span> {transaction?.startedAt ? new Date(transaction.startedAt).toLocaleString() : "—"}</p>
+                <p className="text-sm text-muted-foreground">This vehicle is now visible on the live bay board.</p>
+              </CardContent>
+              <CardFooter className="gap-2">
+                <Button variant="outline" onClick={() => setStep("services")}>Back to Services</Button>
+                <Button onClick={() => setStep("payment")}>Complete Wash <ChevronRight className="ml-2" /></Button>
+              </CardFooter>
+            </Card>
+          </motion.div>
         );
       case "payment":
         const paymentTotal = allServices?.filter(s => servicesForm.getValues("selectedServices").includes(s.id)).reduce((acc, s) => acc + s.price, 0) || 0;
@@ -676,29 +892,72 @@ const handleShareReceipt = async () => {
                                 <FormControl>
                                     <RadioGroup onValueChange={field.onChange} defaultValue={field.value} className="flex flex-col space-y-1">
                                     <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Cash" /></FormControl><FormLabel className="font-normal">Cash</FormLabel></FormItem>
-                                    <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Mobile Money" /></FormControl><FormLabel className="font-normal">Mobile Money</FormLabel></FormItem>
+                                    <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Airtel Money" /></FormControl><FormLabel className="font-normal">Airtel Money</FormLabel></FormItem>
+                                    <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Mobile Money" /></FormControl><FormLabel className="font-normal">Other Mobile Money</FormLabel></FormItem>
+                                    <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Bank Transfer" /></FormControl><FormLabel className="font-normal">Bank Transfer</FormLabel></FormItem>
+                                    <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Other" /></FormControl><FormLabel className="font-normal">Other</FormLabel></FormItem>
                                     <FormItem className="flex items-center space-x-3 space-y-0"><FormControl><RadioGroupItem value="Corporate Account" /></FormControl><FormLabel className="font-normal">Corporate Account (Bill Later)</FormLabel></FormItem>
                                     </RadioGroup>
                                 </FormControl><FormMessage />
                                 </FormItem>
                             )}/>
 
-                            {(watchPaymentMethod === "Mobile Money" || watchPaymentMethod === "Corporate Account") && (
+                            {watchPaymentMethod === "Corporate Account" && (
+                                <FormField
+                                    control={paymentForm.control}
+                                    name="corporateCompanyId"
+                                    render={({ field }) => (
+                                        <FormItem>
+                                            <FormLabel>Company to bill</FormLabel>
+                                            <Select
+                                                onValueChange={field.onChange}
+                                                value={field.value || undefined}
+                                                disabled={isLoadingCorporateCompanies || Boolean(corporateCompaniesError) || activeCorporateCompanies.length === 0}
+                                            >
+                                                <FormControl>
+                                                    <SelectTrigger>
+                                                        <SelectValue placeholder="Select a corporate company" />
+                                                    </SelectTrigger>
+                                                </FormControl>
+                                                <SelectContent>
+                                                    {activeCorporateCompanies.length > 0
+                                                        ? activeCorporateCompanies.map(company => (
+                                                            <SelectItem key={company.id} value={company.id}>
+                                                                {company.name}
+                                                            </SelectItem>
+                                                        ))
+                                                        : <SelectItem value="no-companies" disabled>No active companies available</SelectItem>}
+                                                </SelectContent>
+                                            </Select>
+                                            <FormDescription>
+                                                {activeCorporateCompanies.length > 0
+                                                    ? "This wash will be added to the selected company's outstanding balance."
+                                                    : isLoadingCorporateCompanies
+                                                        ? "Loading available companies..."
+                                                        : corporateCompaniesError
+                                                            ? "The company list could not be loaded. Check Firestore access and try again."
+                                                            : "Ask an admin to add a company under Admin > Corporate before billing this wash."}
+                                            </FormDescription>
+                                            <FormMessage />
+                                        </FormItem>
+                                    )}
+                                />
+                            )}
+
+                            {(watchPaymentMethod === "Airtel Money" || watchPaymentMethod === "Mobile Money" || watchPaymentMethod === "Bank Transfer" || watchPaymentMethod === "Corporate Account") && (
                                 <FormField control={paymentForm.control} name="reference" render={({ field }) => (
                                     <FormItem>
                                         <FormLabel>
-                                            {watchPaymentMethod === "Mobile Money" ? "MoMo Transaction Reference" : "Invoice / PO Reference"}
+                                            {watchPaymentMethod === "Corporate Account" ? "Invoice / PO Reference" : `${watchPaymentMethod} Transaction Reference`}
                                         </FormLabel>
                                         <FormControl>
                                             <Input
-                                                placeholder={watchPaymentMethod === "Mobile Money" ? "e.g. 1234567890" : "e.g. INV-001"}
+                                                placeholder={watchPaymentMethod === "Corporate Account" ? "e.g. INV-001" : "e.g. 1234567890"}
                                                 {...field}
                                             />
                                         </FormControl>
                                         <FormDescription>
-                                            {watchPaymentMethod === "Mobile Money"
-                                                ? "Enter the transaction reference from the customer's MoMo confirmation."
-                                                : "Reference for billing purposes."}
+                                            {watchPaymentMethod === "Corporate Account" ? "Reference for billing purposes." : "Enter the transaction reference from the customer's mobile money confirmation."}
                                         </FormDescription>
                                         <FormMessage />
                                     </FormItem>
@@ -719,18 +978,22 @@ const handleShareReceipt = async () => {
             </Card>
             </motion.div>
         );
-      case "receipt":
+      case "receipt": {
+        const isVoided = transaction?.status === "Voided";
+        const isPendingPayment = transaction?.status === "Pending Payment";
         return (
             <motion.div {...motionProps}>
             <Card className="max-w-md mx-auto">
                 <CardHeader className="text-center">
-                    <div className={`mx-auto rounded-full h-16 w-16 flex items-center justify-center ${transaction?.status === 'Pending Payment' ? 'bg-amber-100' : 'bg-accent'}`}>
-                        {transaction?.status === 'Pending Payment'
-                          ? <Loader2 className="h-10 w-10 text-amber-600" />
-                          : <Check className="h-10 w-10 text-accent-foreground" />}
+                    <div className={`mx-auto rounded-full h-16 w-16 flex items-center justify-center ${isVoided ? 'bg-destructive/10' : isPendingPayment ? 'bg-amber-100' : 'bg-accent'}`}>
+                        {isVoided
+                          ? <Ban className="h-10 w-10 text-destructive" />
+                          : isPendingPayment
+                            ? <Loader2 className="h-10 w-10 text-amber-600" />
+                            : <Check className="h-10 w-10 text-accent-foreground" />}
                     </div>
                     <CardTitle className="mt-4">
-                        {transaction?.status === 'Pending Payment' ? 'Billed to Account' : 'Transaction Complete'}
+                        {isVoided ? 'Transaction Voided' : isPendingPayment ? 'Billed to Account' : 'Transaction Complete'}
                     </CardTitle>
                     <CardDescription>Receipt ID: {transaction?.id}</CardDescription>
                 </CardHeader>
@@ -742,6 +1005,8 @@ const handleShareReceipt = async () => {
                    )}
                     <div className="space-y-2 rounded-md border p-4">
                         <div className="flex justify-between"><span className="text-muted-foreground">License Plate</span><span className="font-medium">{transaction?.licensePlate}</span></div>
+                        <div className="flex justify-between"><span className="text-muted-foreground">Make / Model</span><span className="font-medium">{[transaction?.vehicleMake, transaction?.vehicleModel].filter(Boolean).join(" ") || "—"}</span></div>
+                        {transaction?.corporateCompanyName && <div className="flex justify-between"><span className="text-muted-foreground">Billed to</span><span className="font-medium">{transaction.corporateCompanyName}</span></div>}
                         <div className="flex justify-between"><span className="text-muted-foreground">Date</span><span className="font-medium">{transaction ? new Date(transaction.timestamp).toLocaleString() : ''}</span></div>
                     </div>
                     <div className="space-y-2">
@@ -751,9 +1016,12 @@ const handleShareReceipt = async () => {
                         ))}
                     </div>
                     <Separator />
-                    <div className="flex justify-between font-bold text-lg"><span >Total Paid</span><span>{formatCurrency(transaction?.totalAmount || 0)}</span></div>
+                    <div className="flex justify-between font-bold text-lg"><span>Total</span><span>{formatCurrency(transaction?.totalAmount || 0)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Paid</span><span>{formatCurrency(transaction?.amountPaid || 0)}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Outstanding</span><span>{formatCurrency(transaction?.outstandingBalance || 0)}</span></div>
                     <div className="flex justify-between text-sm"><span className="text-muted-foreground">Payment Method</span><span>{transaction?.payment.method}</span></div>
-                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Status</span><span className={transaction?.status === 'Pending Payment' ? 'text-amber-600 font-medium' : 'text-green-600 font-medium'}>{transaction?.status}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Status</span><span className={isVoided ? 'text-destructive font-medium' : isPendingPayment ? 'text-amber-600 font-medium' : 'text-green-600 font-medium'}>{transaction?.status}</span></div>
+                    <p className="border-t pt-3 text-center text-xs text-muted-foreground">Suggestions and complaints: {suggestionsPhone}</p>
                     {transaction?.payment.reference && (
                         <div className="flex justify-between text-sm">
                             <span className="text-muted-foreground">Reference</span>
@@ -763,13 +1031,26 @@ const handleShareReceipt = async () => {
                 </CardContent>
                 <CardFooter className="flex flex-col gap-2">
                     {transaction && transaction.status !== 'Voided' && (
+                        <div className="w-full text-center text-sm">
+                          <p className={transaction.receiptDeliveryStatus === "Sent" ? "text-green-700" : "text-amber-700"}>
+                            Receipt delivery: {transaction.receiptDeliveryStatus || "Not sent"}
+                          </p>
+                          {transaction.receiptDeliveryError && <p className="text-xs text-muted-foreground">{transaction.receiptDeliveryError}</p>}
+                        </div>
+                    )}
+                    {transaction && transaction.status !== 'Voided' && (
+                        <Button className="w-full" variant="outline" onClick={handleResendReceipt} disabled={!currentVehicle?.phoneNumber || !currentVehicle.whatsappReceiptConsent || isSubmitting}>
+                            Resend Receipt
+                        </Button>
+                    )}
+                    {transaction && transaction.status !== 'Voided' && (
                         <Button
                             className="w-full"
                             variant="outline"
                             onClick={handleShareReceipt}
-                            disabled={!currentVehicle?.phoneNumber}
+                            disabled={!currentVehicle?.phoneNumber || !currentVehicle.whatsappReceiptConsent}
                         >
-                            <Share2 className="mr-2" /> Share to WhatsApp
+                            <Share2 className="mr-2" /> Open WhatsApp Receipt
                         </Button>
                     )}
                     {!currentVehicle?.phoneNumber && transaction && transaction.status !== 'Voided' && (
@@ -792,6 +1073,7 @@ const handleShareReceipt = async () => {
             </Card>
             </motion.div>
         );
+      }
     }
   };
   

@@ -95,7 +95,7 @@ export function VehicleCamera({ onCapture, onClose }: VehicleCameraProps) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/80 p-3 sm:p-4">
         <motion.div {...motionProps} className="bg-card rounded-lg shadow-xl w-full max-w-2xl">
             <div className="p-4 border-b">
                 <h2 className="text-lg font-semibold">{capturedImage ? 'Confirm Photo' : 'Capture Photo'}</h2>
@@ -125,16 +125,16 @@ export function VehicleCamera({ onCapture, onClose }: VehicleCameraProps) {
                 </div>
                  <canvas ref={canvasRef} className="hidden" />
             </div>
-            <div className="p-4 border-t flex justify-between items-center">
-                 <Button variant="outline" onClick={onClose}>Cancel</Button>
+            <div className="flex flex-col-reverse items-stretch gap-2 border-t p-3 sm:flex-row sm:items-center sm:justify-between sm:p-4">
+                 <Button className="w-full sm:w-auto" variant="outline" onClick={onClose}>Cancel</Button>
                 {capturedImage ? (
-                    <div className="flex gap-2">
-                        <Button variant="outline" onClick={handleRetake}><RefreshCcw className="mr-2"/>Retake</Button>
-                        <Button onClick={handleConfirm}>Use Photo</Button>
+                    <div className="grid grid-cols-2 gap-2 sm:flex">
+                        <Button className="w-full" variant="outline" onClick={handleRetake}><RefreshCcw className="mr-2 h-4 w-4"/>Retake</Button>
+                        <Button className="w-full" onClick={handleConfirm}>Use Photo</Button>
                     </div>
                 ) : (
-                    <Button onClick={handleCapture} disabled={hasCameraPermission !== true}>
-                        <Camera className="mr-2" /> Capture
+                    <Button className="w-full sm:w-auto" onClick={handleCapture} disabled={hasCameraPermission !== true}>
+                        <Camera className="mr-2 h-4 w-4" /> Capture
                     </Button>
                 )}
             </div>

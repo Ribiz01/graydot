@@ -66,7 +66,7 @@ export function CustomerList() {
       </div>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center sm:justify-between">
           <CardTitle className="flex items-center gap-2">
             <Users className="h-5 w-5" /> All Customers
           </CardTitle>
@@ -74,7 +74,7 @@ export function CustomerList() {
             placeholder="Search by name or phone…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-[220px]"
+            className="w-full sm:max-w-[220px]"
           />
         </CardHeader>
         <CardContent>
