@@ -16,6 +16,7 @@ import {
   HardHat,
   Briefcase,
   Wallet,
+  ReceiptText,
 } from "lucide-react";
 import {
   SidebarProvider,
@@ -35,6 +36,7 @@ import { Logo } from "./icons/logo";
 const adminNav = [
   { href: "/admin", icon: Home, label: "Dashboard" },
   { href: "/admin/reports", icon: BarChart2, label: "Reports" },
+  { href: "/admin/banking", icon: ReceiptText, label: "Banking & Expenses" },
   { href: "/admin/customers", icon: Trophy, label: "Customers" },
   { href: "/admin/corporate", icon: Briefcase, label: "Corporate" },
   { href: "/admin/locations", icon: MapPin, label: "Locations" },
@@ -75,18 +77,24 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
     <SidebarProvider>
       <Sidebar>
-        <SidebarHeader>
-            <div className="flex items-center px-1 py-2">
-                <Logo className="h-10 w-auto" />
+        <SidebarHeader className="border-b border-sidebar-border px-5 py-5">
+            <div className="flex items-center gap-3">
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
+                  <Car className="size-5" />
+                </span>
+                <Logo className="h-auto min-w-0" />
             </div>
         </SidebarHeader>
-        <SidebarContent>
+        <SidebarContent className="px-3 py-5">
+          <p className="mb-3 px-3 text-[10px] font-bold uppercase text-sidebar-foreground/50">Workspace</p>
           <SidebarMenu>
             {navItems.map((item) => (
               <SidebarMenuItem key={item.href}>
                 <SidebarMenuButton
                   onClick={() => router.push(item.href)}
                   isActive={currentPath === item.href}
+                  size="lg"
+                  className="h-10 px-3 data-[active=true]:bg-sidebar-primary data-[active=true]:text-sidebar-primary-foreground data-[active=true]:shadow-sm"
                 >
                   <item.icon />
                   <span>{item.label}</span>
@@ -95,10 +103,9 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
             ))}
           </SidebarMenu>
         </SidebarContent>
-        <SidebarFooter>
-          <div className="flex items-center gap-2">
+        <SidebarFooter className="border-t border-sidebar-border px-4 py-4">
+          <div className="flex items-center gap-3 rounded-md bg-sidebar-accent/70 p-3">
             <Avatar className="h-8 w-8">
-              <AvatarImage src={`https://i.pravatar.cc/150?u=${user.uid}`} />
               <AvatarFallback>{fallbackInitial}</AvatarFallback>
             </Avatar>
             <div className="flex flex-col overflow-hidden">
@@ -116,12 +123,18 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
         </SidebarFooter>
       </Sidebar>
       <SidebarInset>
-        <header className="flex h-14 items-center justify-between border-b bg-background px-4 lg:px-6">
-            <SidebarTrigger className="md:hidden" />
-            <div className="flex items-center gap-4 ml-auto">
+        <header className="sticky top-0 z-20 flex min-h-16 items-center gap-3 border-b border-border/80 bg-background/95 px-3 backdrop-blur sm:px-5 lg:px-8">
+            <SidebarTrigger className="size-10 shrink-0 rounded-md border border-border bg-card text-foreground md:hidden" />
+            <div className="min-w-0">
+              <p className="truncate text-[10px] font-semibold uppercase text-muted-foreground">Graydot / {user.profile?.role || "Workspace"}</p>
+              <p className="truncate text-sm font-semibold sm:text-base">{navItems.find(item => item.href === currentPath)?.label || "Operations"}</p>
+            </div>
+            <div className="ml-auto flex min-w-0 items-center gap-2 text-xs text-muted-foreground sm:gap-3 sm:text-sm">
+              <MapPin className="size-4 shrink-0 text-primary" />
+              <span className="max-w-36 truncate sm:max-w-none">{user.profile?.locationName || "All locations"}</span>
             </div>
         </header>
-        <main className="flex-1 overflow-y-auto p-4 md:p-6">
+        <main className="mx-auto w-full max-w-[1680px] flex-1 overflow-y-auto px-3 py-5 sm:px-5 sm:py-6 lg:px-8">
             {children}
         </main>
       </SidebarInset>

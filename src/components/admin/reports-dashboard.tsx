@@ -4,8 +4,8 @@ import { useState, useMemo } from "react";
 import { collection, query, where, orderBy } from "firebase/firestore";
 import { useFirestore, useMemoFirebase } from "@/firebase";
 import { useCollection } from "@/firebase/firestore/use-collection";
-import type { Transaction, Customer } from "@/lib/types";
-import { formatCurrency } from "@/lib/utils";
+import type { Transaction, Customer, Expense } from "@/lib/types";
+import { formatCurrency, getAmountReceived, getOutstandingBalance, isWashServed, localDateKey } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -57,21 +57,37 @@ const monthlyConfig = {
   washes: { label: "Completed washes", color: "hsl(var(--primary))" },
 } satisfies ChartConfig;
 
-function isoDate(d: Date) {
-  return d.toISOString().split("T")[0];
-}
-
 function monthKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
 function localDateString(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  return localDateKey(date);
 }
 
 function monthLabel(key: string) {
   const [year, month] = key.split("-").map(Number);
   return new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+
+function transactionDuration(transaction: Transaction) {
+  const duration = transaction.washDurationSeconds ?? (
+    transaction.startedAt && transaction.completedAt
+      ? Math.max(0, Math.floor((Date.parse(transaction.completedAt) - Date.parse(transaction.startedAt)) / 1000))
+      : null
+  );
+  if (duration === null) return "—";
+  const hours = Math.floor(duration / 3600);
+  const minutes = Math.floor((duration % 3600) / 60);
+  return hours ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function transactionTime(value?: string) {
+  return value ? new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] || character);
 }
 
 function monthWindows(key: string) {
@@ -118,6 +134,15 @@ function exportPdf(
   momoTotal: number,
   corpTotal: number,
   txCount: number,
+  airtelTotal: number,
+  otherMobileTotal: number,
+  otherPaymentTotal: number,
+  bankTransferTotal: number,
+  expenseTotal: number,
+  cashAvailable: number,
+  outstandingTotal: number,
+  detailedTransactions: Transaction[],
+  expenseBreakdown: { source: string; amount: number }[],
 ) {
   const fmt = (n: number) => `ZMW ${(n / 100).toFixed(2)}`;
   const pct = (n: number) => totalRevenue > 0 ? `${((n / totalRevenue) * 100).toFixed(1)}%` : "—";
@@ -125,11 +150,31 @@ function exportPdf(
 
   const serviceRows = serviceStats.map(s => `
     <tr>
-      <td>${s.name}</td>
+      <td>${escapeHtml(s.name)}</td>
       <td class="num">${s.count}</td>
       <td class="num">${fmt(s.revenue)}</td>
       <td class="num">${totalRevenue > 0 ? ((s.revenue / totalRevenue) * 100).toFixed(1) + "%" : "—"}</td>
     </tr>`).join("");
+
+  const transactionRows = detailedTransactions.map(transaction => {
+    const photo = /^data:image\/(?:jpeg|png|webp);base64,/i.test(transaction.vehiclePhotoDataUri || "")
+      ? `<img src="${transaction.vehiclePhotoDataUri}" alt="Vehicle ${escapeHtml(transaction.licensePlate)}" style="width:64px;height:44px;object-fit:cover"/>`
+      : "—";
+    const services = transaction.services.map(service => escapeHtml(service.name)).join(", ");
+    const attendants = (transaction.assignedWashers || []).map(washer => escapeHtml(washer.name)).join(", ") || escapeHtml(transaction.washerName || "—");
+    const outstanding = getOutstandingBalance(transaction);
+    return `<tr>
+      <td>${photo}</td>
+      <td>${escapeHtml(transaction.licensePlate)}<br/>${escapeHtml([transaction.vehicleMake, transaction.vehicleModel].filter(Boolean).join(" ") || "—")}</td>
+      <td>${services}</td><td>${attendants}</td>
+      <td>${escapeHtml(transactionTime(transaction.startedAt || transaction.timestamp))} / ${escapeHtml(transactionTime(transaction.completedAt))}</td>
+      <td>${escapeHtml(transactionDuration(transaction))}</td>
+      <td class="num">${fmt(transaction.totalAmount)}</td>
+      <td>${escapeHtml(transaction.payment.method)}<br/>${escapeHtml(transaction.status)}</td>
+      <td class="num">${fmt(outstanding)}</td>
+    </tr>`;
+  }).join("");
+  const expenseRows = expenseBreakdown.map(expense => `<tr><td>${escapeHtml(expense.source)}</td><td class="num">${fmt(expense.amount)}</td></tr>`).join("");
 
   const html = `<!DOCTYPE html>
 <html>
@@ -146,7 +191,8 @@ function exportPdf(
   td { padding: 6px 8px; border-bottom: 1px solid #eee; }
   .num { text-align: right; }
   .total-row td { font-weight: bold; background: #f9f9f9; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 8px; }
+  .details { font-size: 9px; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 8px; }
   .stat { border: 1px solid #ddd; border-radius: 6px; padding: 12px 16px; }
   .stat-label { font-size: 11px; color: #666; margin-bottom: 4px; }
   .stat-value { font-size: 20px; font-weight: bold; }
@@ -170,9 +216,13 @@ function exportPdf(
     <div class="stat-label">${pct(cashTotal)}</div>
   </div>
   <div class="stat">
-    <div class="stat-label">Mobile Money</div>
-    <div class="stat-value">${fmt(momoTotal)}</div>
-    <div class="stat-label">${pct(momoTotal)}</div>
+    <div class="stat-label">Airtel Money</div>
+    <div class="stat-value">${fmt(airtelTotal)}</div>
+    <div class="stat-label">${pct(airtelTotal)}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Expenses</div>
+    <div class="stat-value">${fmt(expenseTotal)}</div>
   </div>
 </div>
 
@@ -181,10 +231,29 @@ function exportPdf(
   <thead><tr><th>Method</th><th class="num">Revenue</th><th class="num">Share</th></tr></thead>
   <tbody>
     <tr><td>Cash</td><td class="num">${fmt(cashTotal)}</td><td class="num">${pct(cashTotal)}</td></tr>
+    <tr><td>Airtel Money</td><td class="num">${fmt(airtelTotal)}</td><td class="num">${pct(airtelTotal)}</td></tr>
     <tr><td>Mobile Money</td><td class="num">${fmt(momoTotal)}</td><td class="num">${pct(momoTotal)}</td></tr>
     <tr><td>Corporate Account (collected)</td><td class="num">${fmt(corpTotal)}</td><td class="num">${pct(corpTotal)}</td></tr>
+    <tr><td>Bank Transfer</td><td class="num">${fmt(bankTransferTotal)}</td><td class="num">${pct(bankTransferTotal)}</td></tr>
+    <tr><td>Other</td><td class="num">${fmt(otherPaymentTotal)}</td><td class="num">${pct(otherPaymentTotal)}</td></tr>
     <tr class="total-row"><td>Total</td><td class="num">${fmt(totalRevenue)}</td><td class="num">100%</td></tr>
   </tbody>
+</table>
+
+<h2>Banking and Receivables</h2>
+<table>
+  <tbody>
+    <tr><td>Cash available for banking (cash received less cash expenses)</td><td class="num">${fmt(cashAvailable)}</td></tr>
+    <tr><td>Other mobile money receipts</td><td class="num">${fmt(otherMobileTotal)}</td></tr>
+    <tr><td>Total expenses</td><td class="num">${fmt(expenseTotal)}</td></tr>
+    <tr><td>Outstanding payments</td><td class="num">${fmt(outstandingTotal)}</td></tr>
+  </tbody>
+</table>
+
+<h2>Expenses by Payment Source</h2>
+<table>
+  <thead><tr><th>Payment source</th><th class="num">Amount</th></tr></thead>
+  <tbody>${expenseRows || '<tr><td colspan="2" style="color:#999">No expenses in this period.</td></tr>'}</tbody>
 </table>
 
 <h2>Services Used</h2>
@@ -193,6 +262,12 @@ function exportPdf(
   <tbody>
     ${serviceRows || '<tr><td colspan="4" style="color:#999">No completed services in this period.</td></tr>'}
   </tbody>
+</table>
+
+<h2>Transaction Details</h2>
+<table class="details">
+  <thead><tr><th>Image</th><th>Registration / Make &amp; Model</th><th>Services</th><th>Attendant(s)</th><th>Start / Complete</th><th>Duration</th><th class="num">Charged</th><th>Payment / Status</th><th class="num">Outstanding</th></tr></thead>
+  <tbody>${transactionRows || '<tr><td colspan="9" style="color:#999">No transactions in this period.</td></tr>'}</tbody>
 </table>
 
 <div class="footer">Generated ${new Date().toLocaleString()} — Graydot Carwash & Auto Detailing</div>
@@ -210,6 +285,7 @@ function exportPdf(
 export function ReportsDashboard() {
   const firestore = useFirestore();
   const [selectedMonth, setSelectedMonth] = useState<string>(() => monthKey(new Date()));
+  const [selectedDay, setSelectedDay] = useState<string>(() => localDateString(new Date()));
   const maxMonth = monthKey(new Date());
   const reportWindow = useMemo(() => monthWindows(selectedMonth), [selectedMonth]);
 
@@ -233,6 +309,22 @@ export function ReportsDashboard() {
     [reportTransactions, reportWindow]
   );
 
+  const expenseQuery = useMemoFirebase(() => {
+    if (!firestore) return null;
+    return query(
+      collection(firestore, "expenses"),
+      where("date", ">=", localDateString(reportWindow.trendStart)),
+      where("date", "<=", localDateString(reportWindow.end)),
+      orderBy("date", "desc")
+    );
+  }, [firestore, reportWindow]);
+  const { data: reportExpenses, isLoading: expensesLoading } = useCollection<Expense>(expenseQuery);
+  const monthlyExpenses = useMemo(() => (reportExpenses ?? []).filter(expense => expense.date >= localDateString(reportWindow.start) && expense.date <= localDateString(reportWindow.end)), [reportExpenses, reportWindow]);
+  const dayTransactions = useMemo(
+    () => transactions.filter(transaction => localDateString(new Date(transaction.timestamp)) === selectedDay),
+    [transactions, selectedDay]
+  );
+
   const previousTransactions = useMemo(
     () => (reportTransactions ?? []).filter(transaction => {
       const timestamp = new Date(transaction.timestamp).getTime();
@@ -250,19 +342,33 @@ export function ReportsDashboard() {
 
   // ── Derived stats ─────────────────────────────────────────────────────────────
   const completed = useMemo(() => transactions.filter(t => t.status === "Completed"), [transactions]);
+  const served = useMemo(() => transactions.filter(isWashServed), [transactions]);
   const previousCompleted = useMemo(
     () => previousTransactions.filter(t => t.status === "Completed"),
     [previousTransactions]
   );
+  const previousServed = useMemo(
+    () => previousTransactions.filter(isWashServed),
+    [previousTransactions]
+  );
 
-  const totalRevenue  = useMemo(() => completed.reduce((a, t) => a + t.totalAmount, 0), [completed]);
-  const previousRevenue = useMemo(() => previousCompleted.reduce((a, t) => a + t.totalAmount, 0), [previousCompleted]);
-  const cashTotal     = useMemo(() => completed.filter(t => t.payment.method === "Cash").reduce((a, t) => a + t.totalAmount, 0), [completed]);
-  const momoTotal     = useMemo(() => completed.filter(t => t.payment.method === "Mobile Money").reduce((a, t) => a + t.totalAmount, 0), [completed]);
-  const corpTotal     = useMemo(() => completed.filter(t => t.payment.method === "Corporate Account").reduce((a, t) => a + t.totalAmount, 0), [completed]);
-  const previousCashTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Cash").reduce((a, t) => a + t.totalAmount, 0), [previousCompleted]);
-  const previousMomoTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Mobile Money").reduce((a, t) => a + t.totalAmount, 0), [previousCompleted]);
-  const previousCorpTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Corporate Account").reduce((a, t) => a + t.totalAmount, 0), [previousCompleted]);
+  const totalRevenue  = useMemo(() => completed.reduce((total, transaction) => total + getAmountReceived(transaction), 0), [completed]);
+  const previousRevenue = useMemo(() => previousCompleted.reduce((total, transaction) => total + getAmountReceived(transaction), 0), [previousCompleted]);
+  const receivedByMethod = (method: Transaction["payment"]["method"]) => completed.filter(transaction => transaction.payment.method === method).reduce((total, transaction) => total + getAmountReceived(transaction), 0);
+  const airtelTotal = useMemo(() => receivedByMethod("Airtel Money"), [completed]);
+  const cashTotal = useMemo(() => receivedByMethod("Cash"), [completed]);
+  const momoTotal = useMemo(() => receivedByMethod("Mobile Money"), [completed]);
+  const corpTotal = useMemo(() => receivedByMethod("Corporate Account"), [completed]);
+  const otherMobileTotal = momoTotal;
+  const otherPaymentTotal = useMemo(() => receivedByMethod("Other"), [completed]);
+  const bankTransferTotal = useMemo(() => receivedByMethod("Bank Transfer"), [completed]);
+  const expenseTotal = useMemo(() => monthlyExpenses.reduce((total, expense) => total + expense.amount, 0), [monthlyExpenses]);
+  const cashExpenses = useMemo(() => monthlyExpenses.filter(expense => expense.paymentSource === "Cash").reduce((total, expense) => total + expense.amount, 0), [monthlyExpenses]);
+  const outstandingTotal = useMemo(() => transactions.filter(transaction => transaction.status === "Pending Payment" && transaction.washStatus !== "In Progress").reduce((total, transaction) => total + getOutstandingBalance(transaction), 0), [transactions]);
+  const cashAvailableForBanking = cashTotal - cashExpenses;
+  const previousCashTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Cash").reduce((total, transaction) => total + getAmountReceived(transaction), 0), [previousCompleted]);
+  const previousMomoTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Mobile Money").reduce((total, transaction) => total + getAmountReceived(transaction), 0), [previousCompleted]);
+  const previousCorpTotal = useMemo(() => previousCompleted.filter(t => t.payment.method === "Corporate Account").reduce((total, transaction) => total + getAmountReceived(transaction), 0), [previousCompleted]);
 
   const monthlyStats = useMemo(() => {
     const months = Array.from({ length: 12 }, (_, index) => {
@@ -272,8 +378,8 @@ export function ReportsDashboard() {
     const monthByKey = new Map(months.map(month => [month.key, month]));
     for (const transaction of reportTransactions ?? []) {
       const month = monthByKey.get(monthKey(new Date(transaction.timestamp)));
-      if (!month || transaction.status !== "Completed") continue;
-      month.revenue += transaction.totalAmount;
+      if (!month || !isWashServed(transaction)) continue;
+      month.revenue += getAmountReceived(transaction);
       month.washes += 1;
     }
     return months;
@@ -281,33 +387,38 @@ export function ReportsDashboard() {
 
   const serviceStats = useMemo(() => {
     const map: Record<string, { count: number; revenue: number }> = {};
-    for (const tx of completed) {
+    for (const tx of served) {
+      const paidAmount = getAmountReceived(tx);
+      const paidShare = tx.totalAmount > 0 ? Math.min(1, paidAmount / tx.totalAmount) : 0;
       for (const s of tx.services) {
         if (!map[s.name]) map[s.name] = { count: 0, revenue: 0 };
         map[s.name].count++;
-        map[s.name].revenue += s.price;
+        map[s.name].revenue += s.price * paidShare;
       }
     }
     return Object.entries(map).map(([name, v]) => ({ name, ...v })).sort((a, b) => b.count - a.count);
-  }, [completed]);
+  }, [served]);
 
   const totalServiceRevenue = useMemo(() => serviceStats.reduce((a, s) => a + s.revenue, 0), [serviceStats]);
   const pieData = useMemo(() => serviceStats.map(s => ({ name: s.name, value: s.count })), [serviceStats]);
 
   const paymentPieData = useMemo(() => [
     { name: "Cash", value: cashTotal },
+    { name: "Airtel Money", value: airtelTotal },
     { name: "Mobile Money", value: momoTotal },
     { name: "Corporate", value: corpTotal },
-  ].filter(d => d.value > 0), [cashTotal, momoTotal, corpTotal]);
+    { name: "Bank Transfer", value: bankTransferTotal },
+    { name: "Other", value: otherPaymentTotal },
+  ].filter(d => d.value > 0), [cashTotal, airtelTotal, momoTotal, corpTotal, bankTransferTotal, otherPaymentTotal]);
 
   const topByVisits = useMemo(() => (customers ?? []).slice(0, 10), [customers]);
   const topBySpend  = useMemo(() => [...(customers ?? [])].sort((a, b) => (b.totalSpendNgwe ?? 0) - (a.totalSpendNgwe ?? 0)).slice(0, 10), [customers]);
   const uniqueVehicles = useMemo(
-    () => new Set(completed.map(transaction => transaction.licensePlate.trim().toUpperCase()).filter(Boolean)).size,
-    [completed]
+    () => new Set(served.map(transaction => transaction.licensePlate.trim().toUpperCase()).filter(Boolean)).size,
+    [served]
   );
-  const completionRate = transactions.length > 0 ? completed.length / transactions.length * 100 : 0;
-  const previousCompletionRate = previousTransactions.length > 0 ? previousCompleted.length / previousTransactions.length * 100 : 0;
+  const completionRate = transactions.length > 0 ? served.length / transactions.length * 100 : 0;
+  const previousCompletionRate = previousTransactions.length > 0 ? previousServed.length / previousTransactions.length * 100 : 0;
   const averageTicket = completed.length > 0 ? totalRevenue / completed.length : 0;
   const previousAverageTicket = previousCompleted.length > 0 ? previousRevenue / previousCompleted.length : 0;
   const pendingCount = transactions.filter(transaction => transaction.status === "Pending Payment").length;
@@ -316,7 +427,7 @@ export function ReportsDashboard() {
   const previousVoidedCount = previousTransactions.filter(transaction => transaction.status === "Voided").length;
   const comparisonData = [
     { label: "Revenue", value: totalRevenue, previous: previousRevenue, formatter: formatCurrency },
-    { label: "Completed washes", value: completed.length, previous: previousCompleted.length, formatter: (value: number) => value.toLocaleString() },
+    { label: "Completed washes", value: served.length, previous: previousServed.length, formatter: (value: number) => value.toLocaleString() },
     { label: "Average ticket", value: averageTicket, previous: previousAverageTicket, formatter: formatCurrency },
     { label: "Completion rate", value: completionRate, previous: previousCompletionRate, formatter: (value: number) => `${value.toFixed(1)}%` },
     { label: "Transactions recorded", value: transactions.length, previous: previousTransactions.length, formatter: (value: number) => value.toLocaleString() },
@@ -327,27 +438,35 @@ export function ReportsDashboard() {
   const reportEndDate = localDateString(reportWindow.end);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-7">
       {/* Header + controls */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Business Reports</h1>
+      <div className="flex flex-col gap-4 border-b border-border/80 pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase text-primary">Insights</p>
+          <h1 className="mt-1 text-2xl font-bold">Business Reports</h1>
           <p className="text-sm text-muted-foreground">Performance, month-over-month movement, and business KPIs.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <label htmlFor="report-month" className="text-sm text-muted-foreground">Report month</label>
+        <div className="grid w-full grid-cols-2 items-center gap-2 sm:flex sm:w-auto">
+          <label htmlFor="report-month" className="col-span-2 text-xs font-medium text-muted-foreground sm:col-span-1">Report month</label>
           <Input
             id="report-month"
             type="month"
             value={selectedMonth}
             max={maxMonth}
-            onChange={event => setSelectedMonth(event.target.value)}
-            className="w-[170px]"
+            onChange={event => {
+              setSelectedMonth(event.target.value);
+              setSelectedDay(`${event.target.value}-01`);
+            }}
+            className="w-full bg-card sm:w-[170px]"
           />
           <Button
             size="sm"
             variant="default"
-            onClick={() => exportPdf(reportStartDate, reportEndDate, serviceStats, totalRevenue, cashTotal, momoTotal, corpTotal, completed.length)}
+            className="col-span-2 w-full sm:col-span-1 sm:w-auto"
+            onClick={() => exportPdf(reportStartDate, reportEndDate, serviceStats, totalRevenue, cashTotal, momoTotal, corpTotal, served.length, airtelTotal, otherMobileTotal, otherPaymentTotal, bankTransferTotal, expenseTotal, cashAvailableForBanking, outstandingTotal, transactions, Object.entries(monthlyExpenses.reduce<Record<string, number>>((totals, expense) => {
+              totals[expense.paymentSource] = (totals[expense.paymentSource] || 0) + expense.amount;
+              return totals;
+            }, {})).map(([source, amount]) => ({ source, amount })))}
           >
             <FileText className="h-4 w-4 mr-1" /> Export PDF
           </Button>
@@ -355,14 +474,14 @@ export function ReportsDashboard() {
       </div>
 
       <Tabs defaultValue="overview">
-        <TabsList className="grid w-full grid-cols-3 max-w-xl">
-          <TabsTrigger value="overview" className="flex items-center gap-2">
+        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto p-1 sm:w-fit sm:max-w-full">
+          <TabsTrigger value="overview" className="min-h-9 shrink-0 gap-2 px-3">
             <TrendingUp className="h-4 w-4" /> Business Overview
           </TabsTrigger>
-          <TabsTrigger value="services" className="flex items-center gap-2">
+          <TabsTrigger value="services" className="min-h-9 shrink-0 gap-2 px-3">
             <TrendingUp className="h-4 w-4" /> Service Analysis
           </TabsTrigger>
-          <TabsTrigger value="customers" className="flex items-center gap-2">
+          <TabsTrigger value="customers" className="min-h-9 shrink-0 gap-2 px-3">
             <Users className="h-4 w-4" /> Customer Insights
           </TabsTrigger>
         </TabsList>
@@ -405,8 +524,13 @@ export function ReportsDashboard() {
               { label: "Pending payment", value: pendingCount.toLocaleString(), sub: "Awaiting payment" },
               { label: "Voided transactions", value: voidedCount.toLocaleString(), sub: "Excluded from revenue" },
               { label: "Cash revenue", value: formatCurrency(cashTotal), sub: totalRevenue > 0 ? `${(cashTotal / totalRevenue * 100).toFixed(1)}% of revenue` : "No completed revenue" },
-              { label: "Mobile money revenue", value: formatCurrency(momoTotal), sub: totalRevenue > 0 ? `${(momoTotal / totalRevenue * 100).toFixed(1)}% of revenue` : "No completed revenue" },
+              { label: "Airtel Money", value: formatCurrency(airtelTotal), sub: "Receipts for the selected month" },
+              { label: "Other mobile money revenue", value: formatCurrency(momoTotal), sub: totalRevenue > 0 ? `${(momoTotal / totalRevenue * 100).toFixed(1)}% of revenue` : "No completed revenue" },
               { label: "Corporate revenue", value: formatCurrency(corpTotal), sub: totalRevenue > 0 ? `${(corpTotal / totalRevenue * 100).toFixed(1)}% of revenue` : "No completed revenue" },
+              { label: "Other payment revenue", value: formatCurrency(otherPaymentTotal), sub: "Other payment methods" },
+              { label: "Expenses", value: formatCurrency(expenseTotal), sub: `${formatCurrency(cashExpenses)} paid from cash` },
+              { label: "Cash available for banking", value: formatCurrency(cashAvailableForBanking), sub: "Cash received less cash expenses" },
+              { label: "Outstanding payments", value: formatCurrency(outstandingTotal), sub: "Unpaid transaction balances" },
             ].map(metric => (
               <Card key={metric.label}>
                 <CardHeader className="pb-1">
@@ -486,6 +610,54 @@ export function ReportsDashboard() {
                     <TableCell className="text-right">{formatCurrency(previousCashTotal)} / {formatCurrency(previousMomoTotal)} / {formatCurrency(previousCorpTotal)}</TableCell>
                     <TableCell className="text-right text-muted-foreground">See payment mix above</TableCell>
                   </TableRow>
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
+              <div><CardTitle>Daily Transaction and Service History</CardTitle><p className="text-sm text-muted-foreground">Full transaction details for the selected day.</p></div>
+              <Input type="date" value={selectedDay} min={reportStartDate} max={reportEndDate} onChange={event => setSelectedDay(event.target.value)} className="w-[170px]" />
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader><TableRow>
+                    <TableHead>Vehicle</TableHead><TableHead>Registration</TableHead><TableHead>Services</TableHead><TableHead>Attendant(s)</TableHead><TableHead>Start / Complete</TableHead><TableHead>Duration</TableHead><TableHead className="text-right">Charged</TableHead><TableHead>Payment / Status</TableHead><TableHead className="text-right">Outstanding</TableHead>
+                  </TableRow></TableHeader>
+                  <TableBody>
+                    {txLoading && <TableRow><TableCell colSpan={9}><Skeleton className="h-8 w-full" /></TableCell></TableRow>}
+                    {!txLoading && dayTransactions.map(transaction => (
+                      <TableRow key={transaction.id}>
+                        <TableCell>{transaction.vehiclePhotoDataUri ? <img src={transaction.vehiclePhotoDataUri} alt={`Vehicle ${transaction.licensePlate}`} className="h-12 w-16 rounded object-cover" /> : <span className="text-xs text-muted-foreground">No image</span>}</TableCell>
+                        <TableCell><div className="font-semibold">{transaction.licensePlate}</div><div className="text-xs text-muted-foreground">{[transaction.vehicleMake, transaction.vehicleModel].filter(Boolean).join(" ") || "Make/model not recorded"}</div></TableCell>
+                        <TableCell className="min-w-36">{transaction.services.map(service => service.name).join(", ")}</TableCell>
+                        <TableCell className="min-w-32">{transaction.assignedWashers?.map(washer => washer.name).join(", ") || transaction.washerName || "—"}</TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">{transactionTime(transaction.startedAt || transaction.timestamp)} / {transactionTime(transaction.completedAt)}</TableCell>
+                        <TableCell>{transactionDuration(transaction)}</TableCell>
+                        <TableCell className="text-right">{formatCurrency(transaction.totalAmount)}</TableCell>
+                        <TableCell><div>{transaction.payment.method}</div><Badge variant={transaction.status === "Completed" ? "secondary" : transaction.status === "Voided" ? "destructive" : "outline"}>{transaction.status}</Badge></TableCell>
+                        <TableCell className="text-right">{formatCurrency(getOutstandingBalance(transaction))}</TableCell>
+                      </TableRow>
+                    ))}
+                    {!txLoading && dayTransactions.length === 0 && <TableRow><TableCell colSpan={9} className="h-20 text-center text-muted-foreground">No transactions recorded on this date.</TableCell></TableRow>}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle>{monthLabel(selectedMonth)} Expense History</CardTitle></CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader><TableRow><TableHead>Date</TableHead><TableHead>Description</TableHead><TableHead>Payment source</TableHead><TableHead className="text-right">Amount</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {expensesLoading && <TableRow><TableCell colSpan={4}><Skeleton className="h-8 w-full" /></TableCell></TableRow>}
+                  {!expensesLoading && monthlyExpenses.map(expense => <TableRow key={expense.id}><TableCell>{expense.date}</TableCell><TableCell className="font-medium">{expense.description}</TableCell><TableCell>{expense.paymentSource}</TableCell><TableCell className="text-right">{formatCurrency(expense.amount)}</TableCell></TableRow>)}
+                  {!expensesLoading && monthlyExpenses.length === 0 && <TableRow><TableCell colSpan={4} className="h-16 text-center text-muted-foreground">No expenses recorded for this month.</TableCell></TableRow>}
+                  <TableRow><TableCell colSpan={3} className="font-semibold">Total expenses</TableCell><TableCell className="text-right font-bold">{formatCurrency(expenseTotal)}</TableCell></TableRow>
                 </TableBody>
               </Table>
             </CardContent>

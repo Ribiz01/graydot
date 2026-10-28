@@ -15,7 +15,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { Transaction } from "@/lib/types";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, getAmountReceived, isWashServed } from "@/lib/utils";
 
 type Preset = "today" | "yesterday" | "last7" | "month" | "custom";
 
@@ -111,7 +111,7 @@ export function AttendantSummary() {
   }, [myTransactions, startDate, endDate]);
 
   // A voided wash never happened as far as the drawer or the car count go.
-  const washes = useMemo(() => inPeriod.filter((t) => t.status !== "Voided"), [inPeriod]);
+  const washes = useMemo(() => inPeriod.filter(isWashServed), [inPeriod]);
 
   // Cash only. Mobile Money and Corporate Account amounts are deliberately never
   // surfaced in the attendant view — those are reconciled by an admin.
@@ -121,7 +121,7 @@ export function AttendantSummary() {
   );
 
   const cashAtHand = useMemo(
-    () => cashWashes.reduce((acc, t) => acc + t.totalAmount, 0),
+    () => cashWashes.reduce((total, transaction) => total + getAmountReceived(transaction), 0),
     [cashWashes]
   );
 
@@ -149,10 +149,16 @@ export function AttendantSummary() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="space-y-7">
+      <div className="flex flex-col gap-4 border-b border-border/80 pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-[10px] font-bold uppercase text-primary">Attendant</p>
+          <h1 className="mt-1 text-2xl font-bold">My Shift</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Washes and cash recorded for your shift.</p>
+        </div>
+      <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
         <Select value={preset} onValueChange={(v) => applyPreset(v as Preset)}>
-          <SelectTrigger className="w-[160px]">
+          <SelectTrigger className="col-span-2 w-full bg-card sm:col-span-1 sm:w-[160px]">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -167,19 +173,20 @@ export function AttendantSummary() {
           value={startDate}
           max={endDate}
           onChange={(e) => { setStartDate(e.target.value); setPreset("custom"); }}
-          className="w-[150px]"
+          className="w-full bg-card sm:w-[145px]"
         />
-        <span className="text-muted-foreground text-sm">to</span>
         <Input
+          aria-label="End date"
           type="date"
           value={endDate}
           min={startDate}
           onChange={(e) => { setEndDate(e.target.value); setPreset("custom"); }}
-          className="w-[150px]"
+          className="w-full bg-card sm:w-[145px]"
         />
       </div>
+      </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Cash at Hand</CardTitle>
@@ -275,7 +282,7 @@ export function AttendantSummary() {
                           {t.services.map((s) => s.name).join(", ")}
                         </TableCell>
                         <TableCell className="text-right font-semibold">
-                          {formatCurrency(t.totalAmount)}
+                          {formatCurrency(getAmountReceived(t))}
                         </TableCell>
                       </TableRow>
                     ))}
